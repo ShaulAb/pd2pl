@@ -32,14 +32,4 @@ def setup_logging(log_file: Path = None):
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
                    "{name}:{function}:{line} - {message}",
             level="DEBUG"       # More detailed logging to file
-        )
-
-# Example logging levels and their use:
-#
-# logger.trace("Extremely detailed debugging information")
-# logger.debug("Detailed debugging information")
-# logger.info("General information about program execution")
-# logger.success("Success messages")
-# logger.warning("Warning messages for potentially harmful situations")
-# logger.error("Error messages for serious problems")
-# logger.critical("Critical messages for fatal errors") 
+        ) 
