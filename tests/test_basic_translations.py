@@ -9,6 +9,51 @@ from tests._helpers import compare_frames
 from pandas_to_polars_translator import translate_code
 from tests.conftest import strip_import_lines
 
+def test_import_stripping():
+    """Test that import lines are correctly stripped."""
+    test_cases = [
+        # Basic cases
+        (
+            "import polars as pl\ndf_pl.head()",
+            "df_pl.head()"
+        ),
+        (
+            "import polars as pl\nimport polars.selectors as cs\ndf_pl.select(cs.numeric()).mean()",
+            "df_pl.select(cs.numeric()).mean()"
+        ),
+        # Extra whitespace cases
+        (
+            "  import polars as pl  \ndf_pl.head()",
+            "df_pl.head()"
+        ),
+        (
+            "import polars as pl\n  import polars.selectors as cs  \ndf_pl.select(cs.numeric()).mean()",
+            "df_pl.select(cs.numeric()).mean()"
+        ),
+        # Empty lines between imports
+        (
+            "import polars as pl\n\ndf_pl.head()",
+            "df_pl.head()"
+        ),
+        (
+            "import polars as pl\n\nimport polars.selectors as cs\n\ndf_pl.select(cs.numeric()).mean()",
+            "df_pl.select(cs.numeric()).mean()"
+        ),
+        # No imports
+        (
+            "df_pl.head()",
+            "df_pl.head()"
+        ),
+        # Multiple imports with mixed spacing
+        (
+            "import polars as pl\n  \n  import polars.selectors as cs\n\ndf_pl.select(cs.numeric()).mean()",
+            "df_pl.select(cs.numeric()).mean()"
+        ),
+    ]
+    for input_code, expected in test_cases:
+        result = strip_import_lines(input_code)
+        assert result == expected, f"\nInput:\n{input_code}\nExpected:\n{expected}\nGot:\n{result}"
+
 @pytest.fixture
 def df_mixed_types():
     """Create a sample DataFrame for testing."""
@@ -109,49 +154,4 @@ class TestAggregations:
             translated = translate_code(pandas_code)
             assert_translation(translated, expected_polars)
             assert compare_frames(pandas_code, translated, df_mixed_types)
-
-def test_import_stripping():
-    """Test that import lines are correctly stripped."""
-    test_cases = [
-        # Basic cases
-        (
-            "import polars as pl\ndf_pl.head()",
-            "df_pl.head()"
-        ),
-        (
-            "import polars as pl\nimport polars.selectors as cs\ndf_pl.select(cs.numeric()).mean()",
-            "df_pl.select(cs.numeric()).mean()"
-        ),
-        # Extra whitespace cases
-        (
-            "  import polars as pl  \ndf_pl.head()",
-            "df_pl.head()"
-        ),
-        (
-            "import polars as pl\n  import polars.selectors as cs  \ndf_pl.select(cs.numeric()).mean()",
-            "df_pl.select(cs.numeric()).mean()"
-        ),
-        # Empty lines between imports
-        (
-            "import polars as pl\n\ndf_pl.head()",
-            "df_pl.head()"
-        ),
-        (
-            "import polars as pl\n\nimport polars.selectors as cs\n\ndf_pl.select(cs.numeric()).mean()",
-            "df_pl.select(cs.numeric()).mean()"
-        ),
-        # No imports
-        (
-            "df_pl.head()",
-            "df_pl.head()"
-        ),
-        # Multiple imports with mixed spacing
-        (
-            "import polars as pl\n  \n  import polars.selectors as cs\n\ndf_pl.select(cs.numeric()).mean()",
-            "df_pl.select(cs.numeric()).mean()"
-        ),
-    ]
-    for input_code, expected in test_cases:
-        result = strip_import_lines(input_code)
-        assert result == expected, f"\nInput:\n{input_code}\nExpected:\n{expected}\nGot:\n{result}"
 
