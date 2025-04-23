@@ -14,33 +14,55 @@ def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple
     
     Moves column specifications to args for more idiomatic Polars code.
     """
-    sort_args = []  # Store columns in args
+    sort_args = []
     sort_kwargs = {}
     
     # Handle column specification
     if 'by' in kwargs:
-        sort_args = [kwargs['by']]  # Move 'by' to args
+        columns = kwargs['by']
     elif args:
-        sort_args = [args[0]]  # Use the first positional arg
+        columns = args[0]
+    else:
+        columns = []
+        
+    # Normalize columns to handle single column and list cases
+    if isinstance(columns, ast.List):
+        # AST List node
+        if len(columns.elts) == 1:
+            sort_args = [columns.elts[0]]  # Single element list -> single value
+        elif len(columns.elts) == 0:
+            sort_args = [ast.List(elts=[], ctx=ast.Load())]  # Empty list -> keep as empty list
+        else:
+            sort_args = [columns]  # Multiple elements -> keep as list
+    elif isinstance(columns, ast.Constant):
+        # Single string constant
+        sort_args = [columns]
+    else:
+        # Other AST node types (expressions, etc.)
+        sort_args = [columns]
     
     # Handle ascending/descending
     if 'ascending' in kwargs:
         ascending = kwargs['ascending']
-        if isinstance(ascending, (list, tuple)):
+        if isinstance(ascending, ast.List):
             # For multiple columns, invert each boolean in the list
-            sort_kwargs['descending'] = [not a for a in ascending]
-        else:
+            sort_kwargs['descending'] = ast.List(
+                elts=[
+                    ast.Constant(value=not elt.value)  # Create boolean constant with inverted value
+                    for elt in ascending.elts
+                ],
+                ctx=ast.Load()
+            )
+        elif isinstance(ascending, ast.Constant):
             # For single value, just invert the boolean
-            sort_kwargs['descending'] = not ascending
+            sort_kwargs['descending'] = ast.Constant(value=not ascending.value)
     
     # Handle na_position
     if 'na_position' in kwargs:
-        # 'last' -> True, 'first' -> False
-        sort_kwargs['nulls_last'] = kwargs['na_position'] == 'last'
-    
-    # If sort_args contains a single-element list, unpack it
-    if len(sort_args) == 1 and isinstance(sort_args[0], list) and len(sort_args[0]) == 1:
-        sort_args = [sort_args[0][0]]
+        na_position = kwargs['na_position']
+        if isinstance(na_position, ast.Constant):
+            # 'last' -> True, 'first' -> False
+            sort_kwargs['nulls_last'] = ast.Constant(value=na_position.value == 'last')
     
     return [('sort', sort_args, sort_kwargs)]
 
