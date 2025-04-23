@@ -5,7 +5,7 @@ import polars as pl
 import numpy as np
 
 from tests._helpers import compare_frames
-from src import translate_code
+from pd2pl import translate_code
 
 @pytest.fixture
 def complex_df():

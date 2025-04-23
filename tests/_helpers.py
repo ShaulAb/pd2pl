@@ -115,7 +115,7 @@ def compare_frames(pandas_expr: str, polars_expr: str, df: pd.DataFrame) -> bool
     except Exception as e:
         print(f"Error executing polars code: {polars_expr}\n{e}")
         return False
-
+    
     # Convert polars back to pandas
     if isinstance(polars_result, Union[pl.DataFrame, pl.Series]):
         polars_result = polars_result.to_pandas()
