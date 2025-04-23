@@ -6,7 +6,7 @@ import polars.selectors as cs
 import numpy as np
 
 from tests._helpers import compare_frames
-from pandas_to_polars_translator import translate_code
+from src import translate_code
 from tests.conftest import strip_import_lines
 
 def test_import_stripping():

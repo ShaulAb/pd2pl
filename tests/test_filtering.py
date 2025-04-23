@@ -5,7 +5,7 @@ import polars as pl
 import polars.selectors as cs
 import numpy as np
 
-from pandas_to_polars_translator import translate_code
+from src import translate_code
 from tests._helpers import compare_frames
 
 

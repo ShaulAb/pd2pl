@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 from loguru import logger
 
-from pandas_to_polars_translator.logging import setup_logging
+from src.logging import setup_logging
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_logging():

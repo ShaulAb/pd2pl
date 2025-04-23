@@ -4,7 +4,7 @@ import pandas as pd
 import polars as pl
 import numpy as np
 
-from pandas_to_polars_translator import translate_code
+from src import translate_code
 from tests._helpers import compare_frames
 
 @pytest.fixture
