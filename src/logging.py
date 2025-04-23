@@ -32,4 +32,4 @@ def setup_logging(log_file: Path = None):
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
                    "{name}:{function}:{line} - {message}",
             level="DEBUG"       # More detailed logging to file
-        ) 
+        )
