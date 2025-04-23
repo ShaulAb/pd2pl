@@ -2,7 +2,9 @@ import pandas as pd
 import polars as pl
 import ast
 from dataclasses import dataclass, asdict
-from typing import Union, Any
+from typing import Union, Any, Dict, Optional
+import polars.selectors as cs
+import numpy as np
 
 @dataclass(slots=True)
 class CompareConfig:
@@ -89,14 +91,31 @@ def compare_frames(pandas_expr: str, polars_expr: str, df: pd.DataFrame) -> bool
         True if the resulting dataframes are equal, False otherwise.
     """
 
-    # Create namespaces
-    pandas_ns = {'pd': pd, 'df': df}
-    polars_ns = {'pl': pl, 'df_pl': pl.from_pandas(df)}
-    
-    # apply the expressions using the new helper
-    pandas_result = execute_code_snippet(pandas_expr, pandas_ns)
-    polars_result = execute_code_snippet(polars_expr, polars_ns)
-    
+    if df is None:
+        raise ValueError("Input DataFrame 'df' cannot be None for compare_frames")
+
+    # Execute pandas code
+    pd_ns = {'df': df.copy(), 'pd': pd, 'np': np}
+    try:
+        pandas_result = execute_code_snippet(pandas_expr, pd_ns)
+    except Exception as e:
+        print(f"Error executing pandas code: {pandas_expr}\n{e}")
+        return False
+
+    # Execute polars code
+    df_pl = pl.from_pandas(df)
+    polars_ns = {
+        'df_pl': df_pl, 
+        'pl': pl, 
+        'np': np,
+        'cs': cs
+    }
+    try:
+        polars_result = execute_code_snippet(polars_expr, polars_ns)
+    except Exception as e:
+        print(f"Error executing polars code: {polars_expr}\n{e}")
+        return False
+
     # Convert polars back to pandas
     if isinstance(polars_result, Union[pl.DataFrame, pl.Series]):
         polars_result = polars_result.to_pandas()
