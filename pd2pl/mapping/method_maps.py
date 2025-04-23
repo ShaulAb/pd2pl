@@ -1,8 +1,48 @@
 """Mapping of pandas DataFrame/Series methods to polars equivalents."""
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List, Tuple, Union
 import ast
 
 from .method_categories import MethodCategory, ChainableMethodTranslation
+
+def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """Transform sort_values arguments to polars sort parameters.
+    
+    Handles:
+    - Column specifications (string, list, or expressions)
+    - Ascending/descending orders
+    - NA position
+    
+    Moves column specifications to args for more idiomatic Polars code.
+    """
+    sort_args = []  # Store columns in args
+    sort_kwargs = {}
+    
+    # Handle column specification
+    if 'by' in kwargs:
+        sort_args = [kwargs['by']]  # Move 'by' to args
+    elif args:
+        sort_args = [args[0]]  # Use the first positional arg
+    
+    # Handle ascending/descending
+    if 'ascending' in kwargs:
+        ascending = kwargs['ascending']
+        if isinstance(ascending, (list, tuple)):
+            # For multiple columns, invert each boolean in the list
+            sort_kwargs['descending'] = [not a for a in ascending]
+        else:
+            # For single value, just invert the boolean
+            sort_kwargs['descending'] = not ascending
+    
+    # Handle na_position
+    if 'na_position' in kwargs:
+        # 'last' -> True, 'first' -> False
+        sort_kwargs['nulls_last'] = kwargs['na_position'] == 'last'
+    
+    # If sort_args contains a single-element list, unpack it
+    if len(sort_args) == 1 and isinstance(sort_args[0], list) and len(sort_args[0]) == 1:
+        sort_args = [sort_args[0][0]]
+    
+    return [('sort', sort_args, sort_kwargs)]
 
 # Basic method translations
 DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
@@ -90,12 +130,16 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
     'sort_values': ChainableMethodTranslation(
         polars_method='sort',
         category=MethodCategory.TRANSFORM,
-        method_chain=lambda args, kwargs: ([
-            ('sort', [], 
-             {'by': kwargs.get('by'),
-              'descending': not kwargs.get('ascending', True) if 'ascending' in kwargs else None}
-            )
-        ]),
+        argument_map={
+            'by': None,                    # Drop 'by' from mapping
+            'ascending': 'descending',     # Will be transformed in method_chain
+            'na_position': 'nulls_last',   # Will be transformed in method_chain
+            'axis': None,                  # Drop axis parameter
+            'inplace': None,               # Drop inplace parameter
+            'kind': None,                  # Drop kind parameter
+            'ignore_index': None,          # Drop ignore_index parameter
+        },
+        method_chain=_transform_sort_chain,
         doc='Sort DataFrame by values'
     ),
     'reset_index': ChainableMethodTranslation(
