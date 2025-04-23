@@ -66,6 +66,35 @@ def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple
     
     return [('sort', sort_args, sort_kwargs)]
 
+def _transform_drop_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """Transform drop arguments to polars drop parameters.
+    
+    Handles:
+    - Column specifications (string, list, or expressions)
+    - Columns parameter
+    - Axis parameter (ignored if columns)
+    - Strict parameter
+    """
+    drop_args = []
+    drop_kwargs = {}
+    
+    # Handle columns parameter first
+    if 'columns' in kwargs:
+        columns = kwargs['columns']
+        if isinstance(columns, ast.List):
+            drop_args = [columns]  # Keep list as is
+        else:
+            drop_args = [columns]  # Single column
+    # Handle positional args if no columns parameter
+    elif args:
+        drop_args = args  # Keep all positional args as is
+    
+    # Handle strict parameter
+    if 'strict' in kwargs:
+        drop_kwargs['strict'] = kwargs['strict']
+    
+    return [('drop', drop_args, drop_kwargs)]
+
 # Basic method translations
 DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
     'head': ChainableMethodTranslation(
@@ -82,6 +111,23 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
         polars_method='describe',
         category=MethodCategory.BASIC,
         doc='Generate descriptive statistics'
+    ),
+    'rename': ChainableMethodTranslation(
+        polars_method='rename',
+        category=MethodCategory.BASIC,
+        doc='Rename columns using a mapping or a function'
+    ),
+    'drop': ChainableMethodTranslation(
+        polars_method='drop',
+        category=MethodCategory.TRANSFORM,
+        argument_map={
+            'axis': None,        # Drop axis parameter
+            'index': None,       # Drop index parameter
+            'inplace': None,     # Drop inplace parameter
+            'columns': None,     # Will be handled in method_chain
+        },
+        method_chain=_transform_drop_chain,
+        doc='Remove columns from the DataFrame'
     ),
     'fillna': ChainableMethodTranslation(
         polars_method='fill_null',
