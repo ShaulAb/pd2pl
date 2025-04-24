@@ -2,6 +2,7 @@
 from typing import Dict, Any, Optional, Callable, List, Tuple, Union
 import ast
 from pd2pl.logging import logger
+from pd2pl.errors import TranslationError
 
 from .method_categories import MethodCategory, ChainableMethodTranslation
 
@@ -180,6 +181,62 @@ def _transform_drop_duplicates_chain(args: List[Any], kwargs: Dict[str, Any]) ->
         
     return [('unique', unique_args, ordered_kwargs)]
 
+# Add supported aggfunc mapping for pivot_table
+SUPPORTED_PIVOT_AGG = {
+    'mean', 'sum', 'min', 'max', 'median', 'count', 'first', 'last'
+}
+
+def _transform_pivot_table_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """Transform pivot_table arguments to polars pivot parameters.
+
+    Handles:
+    - Mapping index, columns, values.
+    - Mapping 'aggfunc' -> 'aggregate_function', defaulting to 'mean'.
+    - Handling 'fill_value' by chaining '.fill_null()'.
+    - Raises errors for unsupported parameters/aggfuncs.
+    """
+    pivot_kwargs = {}
+    fill_value_node = None
+    method_steps = []
+
+    # Check for unsupported args first
+    unsupported_args = {'margins', 'dropna', 'sort'} # Sort is ignored, others error
+    for arg in unsupported_args:
+        if arg in kwargs and arg != 'sort': # Allow sort but ignore it
+             raise TranslationError(f"Unsupported pivot_table parameter: {arg}")
+             # Or: logger.warning(f"Ignoring unsupported pivot_table parameter: {arg}")
+
+    # Map core arguments
+    for pd_arg, pl_arg in [('index', 'index'), ('columns', 'columns'), ('values', 'values')]:
+        if pd_arg in kwargs:
+            pivot_kwargs[pl_arg] = kwargs[pd_arg]
+        elif pd_arg == 'values' and pd_arg not in kwargs:
+             raise TranslationError("pivot_table translation requires explicit 'values' parameter.")
+
+    # Handle aggfunc
+    aggfunc_node = kwargs.get('aggfunc', ast.Constant(value='mean')) # Default to mean
+    if isinstance(aggfunc_node, ast.Constant) and isinstance(aggfunc_node.value, str):
+        aggfunc_str = aggfunc_node.value
+        if aggfunc_str in SUPPORTED_PIVOT_AGG:
+             pivot_kwargs['aggregate_function'] = aggfunc_node
+        else:
+             raise TranslationError(f"Unsupported pivot_table aggfunc string: '{aggfunc_str}'")
+    else:
+         raise TranslationError("Unsupported pivot_table aggfunc: Only string values like 'mean', 'sum', 'count' are supported.")
+
+    # Handle fill_value
+    if 'fill_value' in kwargs:
+        fill_value_node = kwargs['fill_value']
+
+    # Add pivot step
+    method_steps.append(('pivot', [], pivot_kwargs))
+
+    # Add fill_null step if needed
+    if fill_value_node is not None:
+        method_steps.append(('fill_null', [fill_value_node], {}))
+
+    return method_steps
+
 # Basic method translations
 DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
     'head': ChainableMethodTranslation(
@@ -326,6 +383,51 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
         },
         method_chain=_transform_sample_chain,
         doc='Sample rows from the DataFrame'
+    ),
+    'melt': ChainableMethodTranslation(
+        polars_method='unpivot',
+        category=MethodCategory.RESHAPE,
+        argument_map={
+            'id_vars': 'index',
+            'value_vars': 'on',
+            'var_name': 'variable_name',
+            'value_name': 'value_name',
+            'col_level': None,      # Ignore col_level
+            'ignore_index': None,   # Ignore ignore_index
+        },
+        doc='Unpivot DataFrame from wide to long format (similar to melt)'
+    ),
+    'pivot': ChainableMethodTranslation(
+        polars_method='pivot',
+        category=MethodCategory.RESHAPE,
+        argument_map={
+            'index': 'index',
+            'columns': 'columns',
+            'values': 'values', # TODO: Handle case where values is None (needs schema info)
+        },
+        # No method_chain needed for now, relies on explicit 'values'
+        doc='Reshape data (produce a "pivot" table) based on column values.'
+            ' Requires explicit "values" argument. Uses default Polars aggregation ("first").'
+    ),
+    'pivot_table': ChainableMethodTranslation(
+        polars_method='pivot', # Base method is pivot
+        category=MethodCategory.RESHAPE,
+        argument_map={
+            # Arguments handled by the chain function
+            'index': None,
+            'columns': None,
+            'values': None,
+            'aggfunc': None,
+            'fill_value': None,
+            # Ignored/Unsupported arguments
+            'margins': None,
+            'dropna': None,
+            'sort': None, # Explicitly ignore
+        },
+        method_chain=_transform_pivot_table_chain,
+        doc='Reshape data using aggregation (similar to pivot_table).' 
+            ' Limited support for aggfunc (strings only) and parameters.' 
+            ' Handles fill_value via chained fill_null.'
     ),
 }
 
