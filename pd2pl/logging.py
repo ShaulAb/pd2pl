@@ -31,5 +31,5 @@ def setup_logging(log_file: Path = None):
             compression="zip",   # Compress rotated logs
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
                    "{name}:{function}:{line} - {message}",
-            level="DEBUG"       # More detailed logging to file
+            level="INFO"       # More detailed logging to file
         )
