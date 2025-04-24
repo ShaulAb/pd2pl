@@ -33,28 +33,27 @@ Common but less critical operations:
     - [ ] Label-based indexing
     - [ ] Integer-based indexing
   - [ ] Column Modification
-    - [ ] `assign`
-    - [ ] `rename`
-    - [ ] `drop`
+    - [x] `rename`
+    - [x] `drop`
 
 - [ ] Row Operations
-  - [ ] `sort_values`
-  - [ ] `drop_duplicates`
+  - [x] `sort_values`
+  - [x] `sample`
+  - [x] `drop_duplicates`
   - [ ] `reset_index`
   - [ ] `set_index`
 
 - [ ] Reshaping Operations
-  - [ ] `melt`
-  - [ ] `pivot`
-  - [ ] `pivot_table`
+  - [x] `melt`
+  - [x] `pivot` (Current implementation requires explicit `values` arg)
+  - [x] `pivot_table` (Supports basic string aggfuncs and fill_value; margins, dropna, complex aggfuncs unsupported)
 
 ## Lower Priority
 
 Less commonly used but still important features:
 
 - [ ] Join Operations
-  - [ ] `merge`
-  - [ ] `join`
+  - [x] `merge` (Column joins only; index joins and lsuffix unsupported)
   - [ ] `concat`
 
 - [ ] DateTime Operations
@@ -69,15 +68,6 @@ Less commonly used but still important features:
   - [ ] `extract`
   - [ ] Regular expressions
 
-## Nice to Have
-
-Features that would be useful but aren't critical:
-
-- [ ] Advanced Features
-  - [ ] `eval`/`query`
-  - [ ] Category dtype support
-  - [ ] Memory optimization methods
-  - [ ] Custom function application
 
 ## Implementation Notes
 
@@ -103,3 +93,69 @@ When implementing features:
 2. Prioritize features that are essential for production workflows
 3. Consider the complexity of implementation vs. value added
 4. Pay special attention to operations that might have performance implications 
+
+# Optimization Notes
+
+Known tradeoffs:
+
+In the `drop_duplicates` translation:
+**Current Implementation (`maintain_order=True`)**
+   - ✅ Exactly matches pandas behavior
+   - ✅ Preserves row order as users expect from pandas
+   - ❌ Cannot use streaming engine
+   - ❌ Performance penalty for large datasets
+   - ❌ Higher memory usage
+
+**Potential Optimized Version (`maintain_order=False`)**
+   - ✅ Can use streaming engine
+   - ✅ Better performance on large datasets
+   - ✅ Lower memory usage
+   - ❌ Different row ordering than pandas
+   - ❌ Might break user expectations
+
+## Suggested Enhancements
+
+1. **Global Optimization Flag:**
+```python
+# pd2pl/__init__.py
+class TranslationConfig:
+    optimize: bool = False  # Default to pandas-like behavior
+
+# Usage
+pd2pl.TranslationConfig.optimize = True
+translated = translate_code("df.drop_duplicates()")  # -> df_pl.unique()  # maintain_order not set
+```
+
+2. **Per-Translation Optimization:**
+```python
+# More granular control
+translated = translate_code(
+    "df.drop_duplicates()", 
+    optimizations={
+        "drop_duplicates": {
+            "streaming": True,  # Don't use maintain_order
+            "parallel": True,   # Future: Other optimizations
+        }
+    }
+)
+```
+
+3. **Documentation-Based Warning:**
+```python
+def _transform_drop_duplicates_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """
+    Performance Note:
+    ----------------
+    This translation prioritizes pandas compatibility over performance
+    by setting maintain_order=True. For better performance with different
+    ordering semantics, consider using optimize=True in translation config
+    or directly using df_pl.unique() without maintain_order in your code.
+    """
+```
+
+I think this would make a great future enhancement, especially as we identify more such performance vs. compatibility tradeoffs in other translations. We could:
+
+1. Keep the current behavior as default (safe, compatible)
+2. Add the optimization flag in a future PR
+3. Document performance implications clearly
+4. Potentially add warnings when the optimization flag would make a significant difference
