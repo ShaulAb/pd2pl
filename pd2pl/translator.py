@@ -4,7 +4,8 @@ from typing import Any, Dict, Optional, Set, Union, List
 from enum import Enum
 
 from .errors import UnsupportedPandasUsageError, TranslationError
-from .mapping import function_maps, method_maps
+from .mapping import function_maps, method_maps, FUNCTION_TRANSLATIONS
+from .logging import logger
 
 
 class PandasToPolarsTransformer(ast.NodeTransformer):
@@ -12,7 +13,8 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
     
     def __init__(self):
         super().__init__()
-        self.dataframe_vars: Set[str] = {'df'}  # Track DataFrame variables
+        self.dataframe_vars: Set[str] = {'df', 'df_left', 'df_right', 'df_right_diffkey'}
+        self.pandas_aliases: Set[str] = {'pd', 'pandas'}
         self.needs_polars_import = False
         self.needs_selector_import = False
         self.in_filter_context = False
@@ -20,66 +22,64 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
     def visit_Name(self, node: ast.Name) -> ast.Name:
         """Visit a name node and transform DataFrame variable names."""
         if node.id in self.dataframe_vars:
-            return ast.Name(id=f"{node.id}_pl", ctx=node.ctx)
+            transformed_name = f"{node.id}_pl"
+            return ast.Name(id=transformed_name, ctx=node.ctx)
         return node
         
     def visit_Call(self, node: ast.Call) -> ast.AST:
         """Visit a function call node and transform pandas functions to polars."""
-        # Handle module function calls first (e.g., pd.read_csv)
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
-            if node.func.value.id in {'pd', 'pandas'}:
-                return self._transform_pandas_function(node)
+            base_name = node.func.value.id
+            func_name = node.func.attr
+
+            if base_name in self.pandas_aliases and func_name in FUNCTION_TRANSLATIONS:
+                try:
+                    translator_func = FUNCTION_TRANSLATIONS[func_name]
+                    result_node = translator_func(node, visitor=self) 
+                    return result_node
+                except TranslationError as e:
+                    logger.exception(f"TranslationError during {func_name} translation:")
+                    raise e
+                except Exception as e:
+                    logger.exception(f"Unexpected error during {func_name} translation:")
+                    raise TranslationError(f"Internal error translating {func_name}") from e
                 
-        # Handle .isin() method specifically within a filter context
         if self.in_filter_context and isinstance(node.func, ast.Attribute) and node.func.attr == 'isin':
-            # Check if the base is a column selection (Subscript or Attribute on df)
             base = node.func.value
             is_col_selection_base = False
-            # df['col'].isin(...)
             if isinstance(base, ast.Subscript) and isinstance(base.value, ast.Name) and base.value.id in self.dataframe_vars:
                 is_col_selection_base = True
-            # df.col.isin(...)
             elif isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) and base.value.id in self.dataframe_vars:
                 is_col_selection_base = True
                  
             if is_col_selection_base:
-                # Transform the base (df['col'] or df.col) -> pl.col('col')
-                # We call visit on the base, which respects the self.in_filter_context flag
                 transformed_base = self.visit(node.func.value)
                 
-                # Construct pl.col('col').is_in(...)
                 self.needs_polars_import = True
                 polars_isin_call = ast.Call(
                     func=ast.Attribute(
                         value=transformed_base,
-                        attr='is_in', # Polars uses is_in
+                        attr='is_in',
                         ctx=ast.Load()
                     ),
-                    args=node.args, # Use original arguments (the list/iterable)
+                    args=node.args,
                     keywords=node.keywords
                 )
                 return polars_isin_call
         
-        # --- ADDED isna/notna check ---
         elif self.in_filter_context and isinstance(node.func, ast.Attribute) and node.func.attr in ('isna', 'notna'):
-            # Check if the base is a column selection (Subscript or Attribute on df)
             base = node.func.value
             is_col_selection_base = False
-            # df['col'].isna() / df['col'].notna()
             if isinstance(base, ast.Subscript) and isinstance(base.value, ast.Name) and base.value.id in self.dataframe_vars:
                  is_col_selection_base = True
-            # df.col.isna() / df.col.notna()
             elif isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) and base.value.id in self.dataframe_vars:
                  is_col_selection_base = True
                  
             if is_col_selection_base:
-                # Transform the base (df['col'] or df.col) -> pl.col('col')
-                transformed_base = self.visit(node.func.value) # Relies on context flag
+                transformed_base = self.visit(node.func.value)
                 
-                # Determine the corresponding Polars method (is_null or is_not_null)
                 polars_method_name = 'is_null' if node.func.attr == 'isna' else 'is_not_null'
                 
-                # Construct pl.col('col').is_null() or pl.col('col').is_not_null()
                 self.needs_polars_import = True
                 polars_null_check_call = ast.Call(
                     func=ast.Attribute(
@@ -87,20 +87,16 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                         attr=polars_method_name, 
                         ctx=ast.Load()
                     ),
-                    args=[],  # Polars is_null/is_not_null take no arguments
-                    keywords=[] # Polars is_null/is_not_null take no arguments
+                    args=[],
+                    keywords=[]
                 )
                 return polars_null_check_call
-        # --- END isna/notna check ---
-
-        # --- ADDED string method check ---
         elif self.in_filter_context and \
              isinstance(node.func, ast.Attribute) and \
              isinstance(node.func.value, ast.Attribute) and \
              node.func.value.attr == 'str':
             
             pandas_method_name = node.func.attr
-            # Map pandas str method to Polars str method
             method_map = {
                 'contains': 'contains',
                 'startswith': 'starts_with',
@@ -109,8 +105,6 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             polars_method_name = method_map.get(pandas_method_name)
 
             if polars_method_name:
-                # Check if the base is a column selection (Subscript or Attribute on df)
-                # Base is node.func.value.value in this case (e.g., df['col'] from df['col'].str)
                 base = node.func.value.value 
                 is_col_selection_base = False
                 if isinstance(base, ast.Subscript) and isinstance(base.value, ast.Name) and base.value.id in self.dataframe_vars:
@@ -119,14 +113,12 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                      is_col_selection_base = True
 
                 if is_col_selection_base:
-                    # Transform the base (df['col'] or df.col) -> pl.col('col')
-                    transformed_base = self.visit(base) # Relies on context flag
+                    transformed_base = self.visit(base)
                     
-                    # Construct pl.col('col').str.polars_method(...)
                     self.needs_polars_import = True
                     polars_str_call = ast.Call(
                         func=ast.Attribute(
-                            value=ast.Attribute( # Access the .str namespace
+                            value=ast.Attribute(
                                 value=transformed_base,
                                 attr='str',
                                 ctx=ast.Load()
@@ -134,95 +126,42 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                             attr=polars_method_name, 
                             ctx=ast.Load()
                         ),
-                        # Pass original args/kwargs for now. 
                         args=node.args,  
                         keywords=node.keywords 
                     )
                     return polars_str_call
-            # If it's a different string method or base, fall through
-        # --- END string method check ---
-
-        # Handle DataFrame method calls
-        if isinstance(node.func, ast.Attribute):
-            # Check for string methods (df['col'].str.method())
+        elif isinstance(node.func, ast.Attribute):
             if (isinstance(node.func.value, ast.Attribute) and
                 node.func.value.attr == 'str'):
                 return self._transform_string_method(node)
 
-            # Check for window operations (rolling/expanding)
             if (isinstance(node.func.value, ast.Call) and
                 isinstance(node.func.value.func, ast.Attribute) and
                 node.func.value.func.attr in {'rolling', 'expanding'}):
                 return self._transform_window_operation(node)
 
-            # Check for groupby chains
             if (isinstance(node.func.value, ast.Call) and
                 isinstance(node.func.value.func, ast.Attribute) and
                 node.func.value.func.attr == 'groupby'):
                 return self._transform_groupby_agg(node)
 
-            # Check for other method calls (df.method())
             if isinstance(node.func.value, ast.Name):
                 return self._transform_dataframe_method(node)
             
         return self.generic_visit(node)
         
-    def _transform_pandas_function(self, node: ast.Call) -> ast.AST:
-        """Transform a pandas function call to its polars equivalent."""
-        func_name = node.func.attr
-        
-        # Check if function is supported
-        if function_maps.is_special_function(func_name):
-            raise UnsupportedPandasUsageError(f"Pandas function '{func_name}' is not yet supported")
-            
-        translation = function_maps.PANDAS_FUNCTION_TRANSLATIONS.get(func_name)
-        if not translation:
-            raise UnsupportedPandasUsageError(f"Pandas function '{func_name}' has no direct polars equivalent")
-            
-        # Transform the function call
-        self.needs_polars_import = True
-        new_node = ast.Call(
-            func=ast.Attribute(
-                value=ast.Name(id=translation.module, ctx=ast.Load()),
-                attr=translation.polars_function,
-                ctx=ast.Load()
-            ),
-            args=node.args,
-            keywords=node.keywords
-        )
-            
-        # Map argument names if needed
-        if translation.argument_map:
-            new_keywords = []
-            for kw in node.keywords:
-                if kw.arg in translation.argument_map:
-                    if translation.argument_map[kw.arg] is not None:  # None means skip this argument
-                        new_keywords.append(ast.keyword(
-                            arg=translation.argument_map[kw.arg],
-                            value=kw.value
-                        ))
-                else:
-                    new_keywords.append(kw)
-            new_node.keywords = new_keywords
-            
-        return new_node
-        
     def _transform_groupby_agg(self, node: ast.Call) -> ast.AST:
-        """Transform a groupby aggregation chain (e.g., df.groupby().mean())."""
         agg_method = node.func.attr
         groupby_call_node = node.func.value
 
-        # First, transform the inner groupby call
         transformed_groupby = self.visit_Call(groupby_call_node)
 
-        # Determine the Polars aggregation expression
         agg_exprs = []
         if agg_method == 'mean':
-            # df.groupby(...).mean() -> df_pl.groupby(...).agg(pl.all().mean())
             self.needs_polars_import = True
             agg_exprs = [ast.Call(
                 func=ast.Attribute(
-                    value=ast.Call(  # pl.all()
+                    value=ast.Call(
                         func=ast.Attribute(
                             value=ast.Name(id='pl', ctx=ast.Load()),
                             attr='all',
@@ -238,7 +177,6 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 keywords=[]
             )]
         elif agg_method == 'agg':
-            # df.groupby(...).agg({...}) -> df_pl.groupby(...).agg([...])
             self.needs_polars_import = True
             if node.args and isinstance(node.args[0], ast.Dict):
                 dict_arg = node.args[0]
@@ -246,10 +184,9 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                     if isinstance(col_name_node, ast.Constant) and isinstance(agg_func_node, ast.Constant):
                         col_name = col_name_node.value
                         agg_func_str = agg_func_node.value
-                        # Create pl.col('col_name').agg_func()
                         agg_exprs.append(ast.Call(
                             func=ast.Attribute(
-                                value=ast.Call(  # pl.col('col_name')
+                                value=ast.Call(
                                     func=ast.Attribute(
                                         value=ast.Name(id='pl', ctx=ast.Load()),
                                         attr='col',
@@ -258,7 +195,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                                     args=[ast.Constant(value=col_name)],
                                     keywords=[]
                                 ),
-                                attr=agg_func_str,  # Use the pandas agg func name directly for simple cases
+                                attr=agg_func_str,
                                 ctx=ast.Load()
                             ),
                             args=[],
@@ -269,8 +206,6 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             else:
                 raise TranslationError("Unsupported .agg() format after groupby")
         else:
-            # Handle other potential aggregations like .sum(), .max(), etc.
-            # Default: Assume simple aggregation pl.all().agg_method()
             self.needs_polars_import = True
             agg_exprs = [ast.Call(
                 func=ast.Attribute(
@@ -290,10 +225,9 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 keywords=[]
             )]
 
-        # Construct the final Polars node: df_pl.groupby(...).agg([...])
         final_node = ast.Call(
             func=ast.Attribute(
-                value=transformed_groupby,  # The result of df_pl.groupby(...)
+                value=transformed_groupby,
                 attr='agg',
                 ctx=ast.Load()
             ),
@@ -303,26 +237,15 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         return final_node
         
     def _transform_dataframe_method(self, node: ast.Call) -> ast.AST:
-        """Transform a DataFrame method call to its polars equivalent."""
-        # Note: This method now primarily handles *non-chained* calls on a DataFrame variable,
-        # or chains where the base is a simple variable (e.g., df.head()).
-        # Complex chains like groupby().agg() are handled by _transform_groupby_agg.
-        # String chains (df.col.str.method()) are handled by _transform_string_method.
-        
-        # Ensure the base of the call is a simple variable name
         if not isinstance(node.func.value, ast.Name):
-            # Could be a subscript (df['col'].method()) or other complex base.
-            # We might need specific handlers for these later.
-            return self.generic_visit(node) # Fallback for now
+            return self.generic_visit(node)
             
         var_name = node.func.value.id
         method_name = node.func.attr
         
-        # Handle string methods
         if hasattr(node.func.value, 'attr') and node.func.value.attr == 'str':
             return self._transform_string_method(node)
             
-        # Check if method is supported
         if method_maps.is_special_method(method_name):
             raise UnsupportedPandasUsageError(f"Pandas method '{method_name}' is not yet supported")
             
@@ -330,15 +253,12 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         if not translation:
             raise UnsupportedPandasUsageError(f"Pandas method '{method_name}' has no direct polars equivalent")
             
-        # Add to tracked DataFrame variables
         self.dataframe_vars.add(var_name)
         
-        # Set flags for imports
         self.needs_polars_import = True
         if translation.requires_selector:
             self.needs_selector_import = True
 
-        # Handle method chaining if present
         if translation.method_chain:
             args_dict = self._args_to_dict(node)
             chain = translation.method_chain(node.args, args_dict)
@@ -355,9 +275,8 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                         keywords=[ast.keyword(arg=k, value=self._convert_arg_value(v)) 
                                 for k, v in kwargs.items() if v is not None]
                     )
-                return current_node # Return if chain was successfully processed
+                return current_node
 
-        # If not handled by chaining OR chain building failed, transform the method call directly
         new_node = ast.Call(
             func=ast.Attribute(
                 value=ast.Name(id=f"{var_name}_pl", ctx=ast.Load()),
@@ -368,34 +287,29 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             keywords=node.keywords
         )
             
-        # Map argument names if needed (Applied to new_node)
         if translation.argument_map:
             new_keywords = []
-            original_keywords = new_node.keywords # Operate on the keywords of the just-created new_node
+            original_keywords = new_node.keywords
             for kw in original_keywords:
                 if kw.arg in translation.argument_map:
-                    if translation.argument_map[kw.arg] is not None:  # None means skip this argument
+                    if translation.argument_map[kw.arg] is not None:
                         new_keywords.append(ast.keyword(
                             arg=translation.argument_map[kw.arg],
                             value=kw.value
                         ))
                 else:
                     new_keywords.append(kw)
-            new_node.keywords = new_keywords # Assign the modified keywords back
+            new_node.keywords = new_keywords
             
-        return new_node # This should now always have a value if not returned earlier
+        return new_node
         
     def _transform_string_method(self, node: ast.Call) -> ast.AST:
-        """Transform a string method call to its polars equivalent."""
         method_name = node.func.attr
         translation = method_maps.get_method_translation(method_name, is_string_method=True)
         
         if not translation:
             raise UnsupportedPandasUsageError(f"Pandas string method '{method_name}' is not supported")
             
-        # Get the column name from the chain
-        # df['col'].str.method() -> node.func.value.value is the Subscript
-        # df.col.str.method() -> node.func.value.value is the Name
         if isinstance(node.func.value.value, ast.Subscript):
             col_name = node.func.value.value.slice.value
         else:
@@ -403,30 +317,28 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
         self.needs_polars_import = True
 
-        # Create pl.col('col_name').str.method() expression
         inner_expr = ast.Call(
             func=ast.Attribute(
-                value=ast.Attribute(  # Access the 'str' namespace
-                    value=ast.Call(  # Create pl.col('col_name')
-                func=ast.Attribute(
+                value=ast.Attribute(
+                    value=ast.Call(
+                        func=ast.Attribute(
                             value=ast.Name(id='pl', ctx=ast.Load()),
                             attr='col',
                             ctx=ast.Load()
                         ),
                         args=[ast.Constant(value=col_name)],
                         keywords=[]
-                        ),
-                        attr='str',
-                        ctx=ast.Load()
                     ),
-                    attr=translation.polars_method,
+                    attr='str',
                     ctx=ast.Load()
                 ),
-                args=node.args,
-                keywords=node.keywords
-            )
+                attr=translation.polars_method,
+                ctx=ast.Load()
+            ),
+            args=node.args,
+            keywords=node.keywords
+        )
 
-        # Always wrap in df_pl.select(...)
         return ast.Call(
             func=ast.Attribute(
                 value=ast.Name(id='df_pl', ctx=ast.Load()),
@@ -438,12 +350,10 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         )
 
     def _transform_window_operation(self, node: ast.Call) -> ast.AST:
-        """Transform window operations (rolling/expanding) to their polars equivalents."""
-        window_method = node.func.attr  # mean, sum, etc.
-        window_call = node.func.value   # The rolling() or expanding() call
-        window_type = window_call.func.attr  # 'rolling' or 'expanding'
+        window_method = node.func.attr
+        window_call = node.func.value
+        window_type = window_call.func.attr
         
-        # Get the base column reference
         if isinstance(window_call.func.value, ast.Subscript):
             col_name = window_call.func.value.slice.value
         else:
@@ -451,9 +361,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
         self.needs_polars_import = True
         
-        # Create the appropriate Polars expression
         if window_type == 'rolling':
-            # Get window size from the rolling() call
             window_size = None
             for kw in window_call.keywords:
                 if kw.arg == 'window':
@@ -465,7 +373,6 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             if window_size is None:
                 raise TranslationError("Could not determine window size for rolling operation")
 
-            # Create pl.col('col').rolling_mean(window_size=N)
             return ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id='df_pl', ctx=ast.Load()),
@@ -475,10 +382,10 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 args=[
                     ast.Call(
                         func=ast.Attribute(
-                    value=ast.Call(
-                        func=ast.Attribute(
-                            value=ast.Name(id='pl', ctx=ast.Load()),
-                            attr='col',
+                            value=ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id='pl', ctx=ast.Load()),
+                                    attr='col',
                                     ctx=ast.Load()
                                 ),
                                 args=[ast.Constant(value=col_name)],
@@ -491,10 +398,9 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                         keywords=[ast.keyword(arg='window_size', value=ast.Constant(value=window_size))]
                     )
                 ],
-                        keywords=[]
+                keywords=[]
             )
         elif window_type == 'expanding':
-            # Map expanding operations to their Polars equivalents
             method_map = {
                 'sum': 'cum_sum',
                 'mean': 'cum_mean',
@@ -505,7 +411,6 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             if not polars_method:
                 raise TranslationError(f"Unsupported expanding operation: {window_method}")
 
-            # Create pl.col('col').cum_*()
             return ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id='df_pl', ctx=ast.Load()),
@@ -538,19 +443,15 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         
     @staticmethod
     def _args_to_dict(node: ast.Call) -> Dict[str, Any]:
-        """Convert function arguments to a dictionary."""
         args_dict = {}
-        # Add positional arguments
         for i, arg in enumerate(node.args):
             args_dict[f"arg{i}"] = arg
-        # Add keyword arguments
         for keyword in node.keywords:
             args_dict[keyword.arg] = keyword.value
         return args_dict
         
     @staticmethod
     def _convert_arg_value(value: Any) -> ast.AST:
-        """Convert a Python value to an AST node."""
         if isinstance(value, ast.AST):
             return value
         elif isinstance(value, (list, tuple)):
@@ -559,11 +460,8 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             return ast.Constant(value=value) 
 
     def _transform_datetime_accessor(self, node: ast.Attribute) -> ast.AST:
-        """Transform datetime accessor (dt.xxx) to its polars equivalent."""
-        # Get the datetime property being accessed
         dt_attr = node.attr
 
-        # Get the column reference
         if isinstance(node.value.value, ast.Subscript):
             col_name = node.value.value.slice.value
         else:
@@ -571,7 +469,6 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
         self.needs_polars_import = True
 
-        # Create pl.col('col_name').dt.method() expression
         inner_expr = ast.Call(
             func=ast.Attribute(
                 value=ast.Attribute(
@@ -590,11 +487,10 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 attr=dt_attr,
                 ctx=ast.Load()
             ),
-            args=[],  # DateTime methods in Polars are called without arguments
+            args=[],
             keywords=[]
         )
 
-        # Always wrap in df_pl.select(...)
         return ast.Call(
             func=ast.Attribute(
                 value=ast.Name(id='df_pl', ctx=ast.Load()),
@@ -606,18 +502,14 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         )
 
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
-        """Visit an attribute node and transform DataFrame variable names and special attributes."""
-        # Handle datetime accessors (df['date'].dt.year)
         if (isinstance(node.value, ast.Attribute) and 
             isinstance(node.value.value, (ast.Subscript, ast.Name)) and 
             node.value.attr == 'dt'):
             return self._transform_datetime_accessor(node)
         
-        # Check if accessing an attribute of a known DataFrame variable (e.g., df.col)
         is_df_attribute_access = isinstance(node.value, ast.Name) and node.value.id in self.dataframe_vars
 
         if is_df_attribute_access and self.in_filter_context:
-            # Inside Filter: df.col -> pl.col('col')
             self.needs_polars_import = True
             col_name = node.attr
             pl_col_call = ast.Call(
@@ -631,32 +523,24 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             )
             return pl_col_call
 
-        # Handle DataFrame variable name transformation (df.method -> df_pl.method)
-        if is_df_attribute_access: # Removed `and not self.in_filter_context` to allow df_pl.method chains
-             # Just transform the base df -> df_pl. Subsequent visit_Call handles methods.
-             node.value = self.visit(node.value) # Transforms df -> df_pl
-             return node # Results in df_pl.col or df_pl.some_method
+        if is_df_attribute_access:
+             node.value = self.visit(node.value)
+             return node
 
-        # Default visit for other cases
         return self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
-        # Check if the base of the subscript is a known DataFrame variable
         is_df_base = isinstance(node.value, ast.Name) and node.value.id in self.dataframe_vars
 
         if is_df_base:
-            # Determine the type of slice: single column, multi-column, or boolean mask/filter
             is_single_col_select = isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str)
             is_multi_col_select = isinstance(node.slice, (ast.List, ast.Tuple)) and all(
                 isinstance(elt, ast.Constant) and isinstance(elt.value, str) for elt in node.slice.elts
             )
-            # Consider direct boolean series (e.g., df[boolean_series_var]) as filter
             is_boolean_series = isinstance(node.slice, ast.Name) 
             is_filter_slice = not is_single_col_select and not is_multi_col_select or is_boolean_series
 
             if self.in_filter_context and is_single_col_select:
-                # Case 1: Inside a filter condition, accessing a column like df['col']
-                # Transform df['col'] -> pl.col('col')
                 self.needs_polars_import = True
                 col_name = node.slice.value
                 pl_col_call = ast.Call(
@@ -671,31 +555,21 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 return pl_col_call
 
             elif not self.in_filter_context and (is_single_col_select or is_multi_col_select):
-                # Case 2: Outside a filter, basic column selection df['col'] or df[['a','b']]
-                # Transform df -> df_pl, keep the subscript structure
-                node.value = self.visit(node.value) # Ensures df becomes df_pl
-                # Slice (column names) remains unchanged
-                return node # Results in df_pl['col'] or df_pl[['a','b']]
+                node.value = self.visit(node.value)
+                return node
 
             elif is_filter_slice:
-                # Case 3: This is the *outer* filtering operation df[condition]
-                # Transform df[condition] -> df_pl.filter(transformed_condition)
                 self.needs_polars_import = True
                 
-                # Save current context state and set flag
                 _old_context = self.in_filter_context
                 self.in_filter_context = True
                 
-                # Transform the condition expression (the slice)
                 transformed_condition = self.visit(node.slice)
                 
-                # Restore context state
                 self.in_filter_context = _old_context
                 
-                # Transform the base DataFrame name (df -> df_pl)
                 transformed_base = self.visit(node.value)
                 
-                # Construct the df_pl.filter(...) call
                 filter_call = ast.Call(
                     func=ast.Attribute(
                         value=transformed_base,
@@ -707,14 +581,11 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 )
                 return filter_call
             
-            # Handle potential case where a boolean series variable is used directly
-            # This might need refinement if boolean_series is not intended for filtering
             elif is_boolean_series and not self.in_filter_context:
-                 # Treat df[boolean_series_var] as filtering
                  self.needs_polars_import = True
                  _old_context = self.in_filter_context
                  self.in_filter_context = True
-                 transformed_condition = self.visit(node.slice) # Visit the variable name
+                 transformed_condition = self.visit(node.slice)
                  self.in_filter_context = _old_context
                  transformed_base = self.visit(node.value)
                  
@@ -729,6 +600,5 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                  )
                  return filter_call
 
-
-        # If not operating on a known DataFrame or it's an unhandled slice type, visit normally
         return self.generic_visit(node) 
+    
