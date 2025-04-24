@@ -1,6 +1,7 @@
 """Mapping of pandas DataFrame/Series methods to polars equivalents."""
 from typing import Dict, Any, Optional, Callable, List, Tuple, Union
 import ast
+from pd2pl.logging import logger
 
 from .method_categories import MethodCategory, ChainableMethodTranslation
 
@@ -94,6 +95,90 @@ def _transform_drop_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple
         drop_kwargs['strict'] = kwargs['strict']
     
     return [('drop', drop_args, drop_kwargs)]
+
+def _transform_sample_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """Transform sample arguments to polars sample parameters.
+
+    Ensures a consistent keyword argument output order:
+    n/fraction -> seed -> shuffle -> with_replacement
+    """
+    sample_args = []
+    # Use a temporary dict or separate checks to facilitate ordering
+    temp_kwargs = {}
+
+    # Determine primary arg (n or fraction)
+    if 'n' in kwargs:
+        temp_kwargs['n'] = kwargs['n']
+    elif 'frac' in kwargs:
+        temp_kwargs['fraction'] = kwargs['frac']
+    else:
+        # Apply default n=1 if neither was specified
+        temp_kwargs['n'] = ast.Constant(value=1)
+
+    # Check for other args from input
+    has_seed = 'random_state' in kwargs
+    is_replace_true = ('replace' in kwargs and
+                       isinstance(kwargs['replace'], ast.Constant) and
+                       kwargs['replace'].value is True)
+
+    # Build the final dict in the desired order
+    ordered_kwargs = {}
+
+    # 1. Add n or fraction
+    if 'n' in temp_kwargs:
+        ordered_kwargs['n'] = temp_kwargs['n']
+    elif 'fraction' in temp_kwargs:
+        ordered_kwargs['fraction'] = temp_kwargs['fraction']
+
+    # 2. Add seed if present
+    if has_seed:
+        ordered_kwargs['seed'] = kwargs['random_state']
+
+    # 3. Add shuffle=True if seed was present
+    if has_seed:
+        ordered_kwargs['shuffle'] = ast.Constant(value=True)
+
+    # 4. Add with_replacement=True if replace was True
+    if is_replace_true:
+        # Use the original True constant node
+        ordered_kwargs['with_replacement'] = kwargs['replace']
+
+    return [('sample', sample_args, ordered_kwargs)]
+
+def _transform_drop_duplicates_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """Transform drop_duplicates arguments to polars unique parameters.
+    
+    Ensures consistent keyword argument order:
+    1. subset (if present)
+    2. maintain_order
+    3. keep
+    """
+    unique_args = []
+    ordered_kwargs = {}  # Use OrderedDict pattern by adding keys in specific order
+    
+    logger.debug(f"drop_duplicates input kwargs: {kwargs}")
+    
+    # 1. Handle subset first (if present)
+    if 'subset' in kwargs:
+        ordered_kwargs['subset'] = kwargs['subset']
+    
+    # 2. Always add maintain_order=True
+    ordered_kwargs['maintain_order'] = ast.Constant(value=True)
+    
+    # 3. Handle keep parameter last
+    if 'keep' in kwargs:
+        keep_value = kwargs['keep']
+        if isinstance(keep_value, ast.Constant):
+            if keep_value.value is False:
+                ordered_kwargs['keep'] = ast.Constant(value='none')
+            else:
+                ordered_kwargs['keep'] = keep_value
+    else:
+        ordered_kwargs['keep'] = ast.Constant(value='first')
+    
+    logger.debug(f"drop_duplicates output kwargs: {ordered_kwargs}")
+        
+    return [('unique', unique_args, ordered_kwargs)]
 
 # Basic method translations
 DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
@@ -218,9 +303,30 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
     'drop_duplicates': ChainableMethodTranslation(
         polars_method='unique',
         category=MethodCategory.TRANSFORM,
-        argument_map={'subset': 'subset', 'keep': 'keep'},
-        doc='Remove duplicate rows'
-    )
+        argument_map={
+            'subset': None,        # Handled by chain
+            'keep': None,         # Handled by chain
+            'inplace': None,      # Drop inplace parameter
+            'ignore_index': None, # Drop ignore_index parameter
+        },
+        method_chain=_transform_drop_duplicates_chain,
+        doc='Remove duplicate rows while maintaining order'
+    ),
+    'sample': ChainableMethodTranslation(
+        polars_method='sample',
+        category=MethodCategory.BASIC,
+        argument_map={
+            'n': 'n',                  # Pass 'n' through if not handled by default logic
+            'frac': None,              # Handled by chain, drop original
+            'replace': None,           # Handled by chain, drop original
+            'weights': None,           # Ignore weights
+            'random_state': None,      # Handled by chain, drop original
+            'axis': None,              # Ignore axis
+            'ignore_index': None,      # Ignore ignore_index
+        },
+        method_chain=_transform_sample_chain,
+        doc='Sample rows from the DataFrame'
+    ),
 }
 
 # String method translations
