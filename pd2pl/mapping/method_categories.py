@@ -10,6 +10,7 @@ class MethodCategory(Enum):
     TRANSFORM = 'transform'
     WINDOW = 'window'
     BASIC = 'basic'
+    RESHAPE = 'reshape'  # Added for melt/pivot etc.
 
 @dataclass
 class ChainableMethodTranslation:
