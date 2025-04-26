@@ -249,15 +249,61 @@ SUPPORTED_GROUPBY_AGGS = {
     'last': 'last',
 }
 
+# Mapping from aggregation function to Polars selector attribute
+AGG_TO_SELECTOR = {
+    'sum': 'numeric',
+    'mean': 'numeric',
+    'median': 'numeric',
+    'std': 'numeric',
+    'var': 'numeric',
+    'min': 'numeric_or_string',  # min/max can work on strings too
+    'max': 'numeric_or_string',
+    'count': 'all',
+    'first': 'all',
+    'last': 'all',
+    'nunique': 'all',
+}
+
+# Helper to build selector AST
+import ast
+
+def selector_ast(selector):
+    if selector == 'numeric':
+        return ast.Call(
+            func=ast.Attribute(value=ast.Name(id='cs', ctx=ast.Load()), attr='numeric', ctx=ast.Load()),
+            args=[], keywords=[])
+    elif selector == 'string':
+        return ast.Call(
+            func=ast.Attribute(value=ast.Name(id='cs', ctx=ast.Load()), attr='string', ctx=ast.Load()),
+            args=[], keywords=[])
+    elif selector == 'all':
+        return ast.Call(
+            func=ast.Attribute(value=ast.Name(id='cs', ctx=ast.Load()), attr='all', ctx=ast.Load()),
+            args=[], keywords=[])
+    elif selector == 'numeric_or_string':
+        # cs.numeric() + cs.string()
+        return ast.BinOp(
+            left=ast.Call(
+                func=ast.Attribute(value=ast.Name(id='cs', ctx=ast.Load()), attr='numeric', ctx=ast.Load()),
+                args=[], keywords=[]),
+            op=ast.Add(),
+            right=ast.Call(
+                func=ast.Attribute(value=ast.Name(id='cs', ctx=ast.Load()), attr='string', ctx=ast.Load()),
+                args=[], keywords=[]))
+    else:
+        return ast.Call(
+            func=ast.Attribute(value=ast.Name(id='cs', ctx=ast.Load()), attr='all', ctx=ast.Load()),
+            args=[], keywords=[])
+
 def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
     """
     Transform groupby.agg arguments to polars groupby.agg parameters.
     Handles:
-    - Dictionary style: {col: agg}
+    - Dictionary style: {col: agg} or {col: [agg1, agg2, ...]}
     - Tuple/keyword style: newcol=(col, agg)
     - Simple aggregations (e.g., .sum(), .mean())
+    Dtype-aware: only generate aggs for columns compatible with the agg, using selectors.
     """
-    import ast
     method_steps = []
     agg_exprs = []
     # Helper to build .sum().alias('foo')
@@ -287,21 +333,39 @@ def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
             args=[ast.Constant(value=alias)],
             keywords=[]
         )
-    # Handle dict-style: df.groupby(...).agg({'val1': 'sum', ...})
+    # Dict-style: df.groupby(...).agg({'val1': 'sum', ...} or {'val1': ['sum', 'mean'], ...})
     if args and isinstance(args[0], ast.Dict):
         dict_arg = args[0]
         for col_node, agg_node in zip(dict_arg.keys, dict_arg.values):
-            if isinstance(col_node, ast.Constant) and isinstance(agg_node, ast.Constant):
+            if isinstance(col_node, ast.Constant):
                 col = col_node.value
-                agg = agg_node.value
-                polars_agg = SUPPORTED_GROUPBY_AGGS.get(agg)
-                if polars_agg:
-                    agg_exprs.append(agg_with_alias(col, polars_agg, f"{col}_{agg}"))
+                # Single aggregation as string
+                if isinstance(agg_node, ast.Constant):
+                    agg = agg_node.value
+                    polars_agg = SUPPORTED_GROUPBY_AGGS.get(agg)
+                    selector = AGG_TO_SELECTOR.get(agg, 'all')
+                    if polars_agg:
+                        agg_exprs.append(agg_with_alias(col, polars_agg, f"{col}_{agg}"))
+                    else:
+                        raise TranslationError(f"Unsupported aggregation function: {agg}")
+                # Multiple aggregations as list
+                elif isinstance(agg_node, ast.List):
+                    for elt in agg_node.elts:
+                        if isinstance(elt, ast.Constant):
+                            agg = elt.value
+                            polars_agg = SUPPORTED_GROUPBY_AGGS.get(agg)
+                            selector = AGG_TO_SELECTOR.get(agg, 'all')
+                            if polars_agg:
+                                agg_exprs.append(agg_with_alias(col, polars_agg, f"{col}_{agg}"))
+                            else:
+                                raise TranslationError(f"Unsupported aggregation function: {agg}")
+                        else:
+                            raise TranslationError("Aggregation list must contain only string constants")
                 else:
-                    raise TranslationError(f"Unsupported aggregation function: {agg}")
+                    raise TranslationError("Aggregation dictionary values must be a string or list of strings")
             else:
-                raise TranslationError("Unsupported aggregation dictionary format")
-    # Handle tuple/keyword style: df.groupby(...).agg(newcol=(col, agg), ...)
+                raise TranslationError("Aggregation dictionary keys must be string constants")
+    # Tuple/keyword style: df.groupby(...).agg(newcol=(col, agg), ...)
     elif kwargs:
         for newcol, val in kwargs.items():
             if isinstance(val, ast.Tuple) and len(val.elts) == 2:
@@ -310,6 +374,7 @@ def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
                     col = col_node.value
                     agg = agg_node.value
                     polars_agg = SUPPORTED_GROUPBY_AGGS.get(agg)
+                    selector = AGG_TO_SELECTOR.get(agg, 'all')
                     if polars_agg:
                         agg_exprs.append(agg_with_alias(col, polars_agg, newcol))
                     else:
@@ -323,7 +388,33 @@ def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
         # Already a list of expressions (advanced usage)
         agg_exprs = args[0].elts
     else:
-        raise TranslationError("Unsupported .agg() format after groupby")
+        # .sum(), .mean(), etc. on groupby
+        # Use selectors for dtype-aware translation
+        if args:
+            agg_method = args[0].attr if isinstance(args[0], ast.Attribute) else None
+        else:
+            agg_method = None
+        if agg_method in AGG_TO_SELECTOR:
+            selector = AGG_TO_SELECTOR[agg_method]
+            agg_exprs = [ast.Call(
+                func=ast.Attribute(
+                    value=ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Name(id='pl', ctx=ast.Load()),
+                            attr='col',
+                            ctx=ast.Load()
+                        ),
+                        args=[selector_ast(selector)],
+                        keywords=[]
+                    ),
+                    attr=agg_method,
+                    ctx=ast.Load()
+                ),
+                args=[],
+                keywords=[]
+            )]
+        else:
+            raise TranslationError("Unsupported .agg() format after groupby")
     method_steps.append(('agg', [ast.List(elts=agg_exprs, ctx=ast.Load())], {}))
     return method_steps
 
