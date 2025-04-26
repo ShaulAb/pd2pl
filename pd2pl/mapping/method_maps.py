@@ -304,7 +304,9 @@ def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
     - Dictionary style: {col: agg} or {col: [agg1, agg2, ...]}
     - Tuple/keyword style: newcol=(col, agg)
     - Simple aggregations (e.g., .sum(), .mean())
+    - Simple lambdas (e.g., lambda x: x.max() - x.min()) and named functions (np.mean, np.sum)
     Dtype-aware: only generate aggs for columns compatible with the agg, using selectors.
+    Only supports single-expression lambdas using supported methods. Unsupported UDFs will raise TranslationError.
     """
     method_steps = []
     agg_exprs = []
@@ -335,6 +337,102 @@ def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
             args=[ast.Constant(value=alias)],
             keywords=[]
         )
+    # Helper to build custom Polars expr for simple lambdas
+    def lambda_to_polars_expr(col, lambda_node, alias):
+        # Only support: lambda x: x.<agg>() or lambda x: x.<agg>() <op> x.<agg>()
+        if not isinstance(lambda_node, ast.Lambda):
+            raise TranslationError("Only simple lambdas are supported in groupby.agg.")
+        body = lambda_node.body
+        # Single method call: lambda x: x.<agg>()
+        if isinstance(body, ast.Call) and isinstance(body.func, ast.Attribute):
+            agg = body.func.attr
+            if agg in SUPPORTED_GROUPBY_AGGS:
+                return agg_with_alias(col, agg, alias)
+        # Binary op: lambda x: x.<agg>() <op> x.<agg>()
+        if isinstance(body, ast.BinOp):
+            left = body.left
+            right = body.right
+            op = body.op
+            if all(isinstance(side, ast.Call) and isinstance(side.func, ast.Attribute) for side in [left, right]):
+                left_agg = left.func.attr
+                right_agg = right.func.attr
+                if left_agg in SUPPORTED_GROUPBY_AGGS and right_agg in SUPPORTED_GROUPBY_AGGS:
+                    # Build: (pl.col(col).<left_agg>() <op> pl.col(col).<right_agg>()).alias(alias)
+                    left_expr = ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Call(
+                                        func=ast.Attribute(
+                                            value=ast.Name(id='pl', ctx=ast.Load()),
+                                            attr='col',
+                                            ctx=ast.Load()
+                                        ),
+                                        args=[ast.Constant(value=col)],
+                                        keywords=[]
+                                    ),
+                                    attr=left_agg,
+                                    ctx=ast.Load()
+                                ),
+                                args=[],
+                                keywords=[]
+                            ),
+                            attr='alias',
+                            ctx=ast.Load()
+                        ),
+                        args=[ast.Constant(value=f"{col}_{left_agg}")],
+                        keywords=[]
+                    )
+                    right_expr = ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Call(
+                                        func=ast.Attribute(
+                                            value=ast.Name(id='pl', ctx=ast.Load()),
+                                            attr='col',
+                                            ctx=ast.Load()
+                                        ),
+                                        args=[ast.Constant(value=col)],
+                                        keywords=[]
+                                    ),
+                                    attr=right_agg,
+                                    ctx=ast.Load()
+                                ),
+                                args=[],
+                                keywords=[]
+                            ),
+                            attr='alias',
+                            ctx=ast.Load()
+                        ),
+                        args=[ast.Constant(value=f"{col}_{right_agg}")],
+                        keywords=[]
+                    )
+                    # Build the binary op with parentheses
+                    binop_expr = ast.BinOp(
+                        left=left_expr,
+                        op=op,
+                        right=right_expr
+                    )
+                    # Wrap the binary op in parentheses for correct formatting
+                    paren_expr = ast.Call(
+                        func=ast.Name(id='(', ctx=ast.Load()),
+                        args=[binop_expr],
+                        keywords=[]
+                    )
+                    # Alias the result
+                    return ast.Call(
+                        func=ast.Attribute(
+                            value=paren_expr,
+                            attr='alias',
+                            ctx=ast.Load()
+                        ),
+                        args=[ast.Constant(value=alias)],
+                        keywords=[]
+                    )
+        raise TranslationError(
+            "Only simple single-expression lambdas using supported methods (e.g., lambda x: x.max() - x.min()) are supported. See documentation for details."
+        )
     # Dict-style: df.groupby(...).agg({'val1': 'sum', ...} or {'val1': ['sum', 'mean'], ...})
     if args and isinstance(args[0], ast.Dict):
         dict_arg = args[0]
@@ -361,10 +459,26 @@ def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
                                 agg_exprs.append(agg_with_alias(col, polars_agg, f"{col}_{agg}"))
                             else:
                                 raise TranslationError(f"Unsupported aggregation function: {agg}")
+                        elif isinstance(elt, ast.Lambda):
+                            agg_exprs.append(lambda_to_polars_expr(col, elt, f"{col}_udf"))
                         else:
-                            raise TranslationError("Aggregation list must contain only string constants")
+                            raise TranslationError("Aggregation list must contain only string constants or simple lambdas")
+                elif isinstance(agg_node, ast.Lambda):
+                    agg_exprs.append(lambda_to_polars_expr(col, agg_node, f"{col}_udf"))
+                elif isinstance(agg_node, (ast.Name, ast.Attribute)):
+                    # Named function (e.g., np.mean, pd.Series.mean)
+                    if isinstance(agg_node, ast.Name):
+                        func_name = agg_node.id
+                    elif isinstance(agg_node, ast.Attribute):
+                        func_name = agg_node.attr
+                    else:
+                        func_name = None
+                    if func_name in SUPPORTED_GROUPBY_AGGS:
+                        agg_exprs.append(agg_with_alias(col, func_name, f"{col}_{func_name}"))
+                    else:
+                        raise TranslationError(f"Unsupported named function: {func_name}")
                 else:
-                    raise TranslationError("Aggregation dictionary values must be a string or list of strings")
+                    raise TranslationError("Aggregation dictionary values must be a string, list of strings, simple lambda, or supported named function")
             else:
                 raise TranslationError("Aggregation dictionary keys must be string constants")
     # Tuple/keyword style: df.groupby(...).agg(newcol=(col, agg), ...)
@@ -372,17 +486,33 @@ def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
         for newcol, val in kwargs.items():
             if isinstance(val, ast.Tuple) and len(val.elts) == 2:
                 col_node, agg_node = val.elts
-                if isinstance(col_node, ast.Constant) and isinstance(agg_node, ast.Constant):
+                if isinstance(col_node, ast.Constant):
                     col = col_node.value
-                    agg = agg_node.value
-                    polars_agg = SUPPORTED_GROUPBY_AGGS.get(agg)
-                    selector = AGG_TO_SELECTOR.get(agg, 'all')
-                    if polars_agg:
-                        agg_exprs.append(agg_with_alias(col, polars_agg, newcol))
+                    if isinstance(agg_node, ast.Constant):
+                        agg = agg_node.value
+                        polars_agg = SUPPORTED_GROUPBY_AGGS.get(agg)
+                        selector = AGG_TO_SELECTOR.get(agg, 'all')
+                        if polars_agg:
+                            agg_exprs.append(agg_with_alias(col, polars_agg, newcol))
+                        else:
+                            raise TranslationError(f"Unsupported aggregation function: {agg}")
+                    elif isinstance(agg_node, ast.Lambda):
+                        agg_exprs.append(lambda_to_polars_expr(col, agg_node, newcol))
+                    elif isinstance(agg_node, (ast.Name, ast.Attribute)):
+                        if isinstance(agg_node, ast.Name):
+                            func_name = agg_node.id
+                        elif isinstance(agg_node, ast.Attribute):
+                            func_name = agg_node.attr
+                        else:
+                            func_name = None
+                        if func_name in SUPPORTED_GROUPBY_AGGS:
+                            agg_exprs.append(agg_with_alias(col, func_name, newcol))
+                        else:
+                            raise TranslationError(f"Unsupported named function: {func_name}")
                     else:
-                        raise TranslationError(f"Unsupported aggregation function: {agg}")
+                        raise TranslationError("Unsupported tuple aggregation format: only string, simple lambda, or supported named function")
                 else:
-                    raise TranslationError("Unsupported tuple aggregation format")
+                    raise TranslationError("Unsupported tuple aggregation format: first element must be column name")
             else:
                 raise TranslationError("Unsupported tuple aggregation format")
     # Fallback: treat as simple aggregation (e.g., .sum(), .mean())
