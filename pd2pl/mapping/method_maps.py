@@ -237,6 +237,96 @@ def _transform_pivot_table_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
 
     return method_steps
 
+# Registry of supported aggregation functions for groupby
+SUPPORTED_GROUPBY_AGGS = {
+    'sum': 'sum',
+    'mean': 'mean',
+    'min': 'min',
+    'max': 'max',
+    'count': 'count',
+    'median': 'median',
+    'first': 'first',
+    'last': 'last',
+}
+
+def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """
+    Transform groupby.agg arguments to polars groupby.agg parameters.
+    Handles:
+    - Dictionary style: {col: agg}
+    - Tuple/keyword style: newcol=(col, agg)
+    - Simple aggregations (e.g., .sum(), .mean())
+    """
+    import ast
+    method_steps = []
+    agg_exprs = []
+    # Helper to build .sum().alias('foo')
+    def agg_with_alias(col, agg, alias):
+        return ast.Call(
+            func=ast.Attribute(
+                value=ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr='col',
+                                ctx=ast.Load()
+                            ),
+                            args=[ast.Constant(value=col)],
+                            keywords=[]
+                        ),
+                        attr=agg,
+                        ctx=ast.Load()
+                    ),
+                    args=[],
+                    keywords=[]
+                ),
+                attr='alias',
+                ctx=ast.Load()
+            ),
+            args=[ast.Constant(value=alias)],
+            keywords=[]
+        )
+    # Handle dict-style: df.groupby(...).agg({'val1': 'sum', ...})
+    if args and isinstance(args[0], ast.Dict):
+        dict_arg = args[0]
+        for col_node, agg_node in zip(dict_arg.keys, dict_arg.values):
+            if isinstance(col_node, ast.Constant) and isinstance(agg_node, ast.Constant):
+                col = col_node.value
+                agg = agg_node.value
+                polars_agg = SUPPORTED_GROUPBY_AGGS.get(agg)
+                if polars_agg:
+                    agg_exprs.append(agg_with_alias(col, polars_agg, f"{col}_{agg}"))
+                else:
+                    raise TranslationError(f"Unsupported aggregation function: {agg}")
+            else:
+                raise TranslationError("Unsupported aggregation dictionary format")
+    # Handle tuple/keyword style: df.groupby(...).agg(newcol=(col, agg), ...)
+    elif kwargs:
+        for newcol, val in kwargs.items():
+            if isinstance(val, ast.Tuple) and len(val.elts) == 2:
+                col_node, agg_node = val.elts
+                if isinstance(col_node, ast.Constant) and isinstance(agg_node, ast.Constant):
+                    col = col_node.value
+                    agg = agg_node.value
+                    polars_agg = SUPPORTED_GROUPBY_AGGS.get(agg)
+                    if polars_agg:
+                        agg_exprs.append(agg_with_alias(col, polars_agg, newcol))
+                    else:
+                        raise TranslationError(f"Unsupported aggregation function: {agg}")
+                else:
+                    raise TranslationError("Unsupported tuple aggregation format")
+            else:
+                raise TranslationError("Unsupported tuple aggregation format")
+    # Fallback: treat as simple aggregation (e.g., .sum(), .mean())
+    elif args and isinstance(args[0], ast.List):
+        # Already a list of expressions (advanced usage)
+        agg_exprs = args[0].elts
+    else:
+        raise TranslationError("Unsupported .agg() format after groupby")
+    method_steps.append(('agg', [ast.List(elts=agg_exprs, ctx=ast.Load())], {}))
+    return method_steps
+
 # Basic method translations
 DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
     'head': ChainableMethodTranslation(
@@ -428,6 +518,12 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
         doc='Reshape data using aggregation (similar to pivot_table).' 
             ' Limited support for aggfunc (strings only) and parameters.' 
             ' Handles fill_value via chained fill_null.'
+    ),
+    'agg': ChainableMethodTranslation(
+        polars_method='agg',
+        category=MethodCategory.AGGREGATION,
+        method_chain=_transform_groupby_agg_chain,
+        doc='Aggregate using one or more operations over the specified axis.'
     ),
 }
 
