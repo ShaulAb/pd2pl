@@ -156,82 +156,53 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
         transformed_groupby = self.visit_Call(groupby_call_node)
 
-        agg_exprs = []
-        if agg_method == 'mean':
-            self.needs_polars_import = True
-            agg_exprs = [ast.Call(
-                func=ast.Attribute(
-                    value=ast.Call(
+        # Use mapping layer for 'agg' method
+        if agg_method == 'agg':
+            translation = method_maps.get_method_translation('agg')
+            if translation and translation.method_chain:
+                args_dict = self._args_to_dict(node)
+                chain = translation.method_chain(node.args, args_dict)
+                current_node = transformed_groupby
+                for method, args, kwargs in chain:
+                    current_node = ast.Call(
                         func=ast.Attribute(
-                            value=ast.Name(id='pl', ctx=ast.Load()),
-                            attr='all',
+                            value=current_node,
+                            attr=method,
                             ctx=ast.Load()
                         ),
-                        args=[],
-                        keywords=[]
-                    ),
-                    attr='mean',
-                    ctx=ast.Load()
-                ),
-                args=[],
-                keywords=[]
-            )]
-        elif agg_method == 'agg':
-            self.needs_polars_import = True
-            if node.args and isinstance(node.args[0], ast.Dict):
-                dict_arg = node.args[0]
-                for col_name_node, agg_func_node in zip(dict_arg.keys, dict_arg.values):
-                    if isinstance(col_name_node, ast.Constant) and isinstance(agg_func_node, ast.Constant):
-                        col_name = col_name_node.value
-                        agg_func_str = agg_func_node.value
-                        agg_exprs.append(ast.Call(
-                            func=ast.Attribute(
-                                value=ast.Call(
-                                    func=ast.Attribute(
-                                        value=ast.Name(id='pl', ctx=ast.Load()),
-                                        attr='col',
-                                        ctx=ast.Load()
-                                    ),
-                                    args=[ast.Constant(value=col_name)],
-                                    keywords=[]
-                                ),
-                                attr=agg_func_str,
-                                ctx=ast.Load()
-                            ),
-                            args=[],
-                            keywords=[]
-                        ))
-                    else:
-                        raise TranslationError("Unsupported aggregation dictionary format")
+                        args=args,
+                        keywords=[ast.keyword(arg=k, value=self._convert_arg_value(v))
+                                  for k, v in kwargs.items() if v is not None]
+                    )
+                return current_node
             else:
-                raise TranslationError("Unsupported .agg() format after groupby")
-        else:
-            self.needs_polars_import = True
-            agg_exprs = [ast.Call(
-                func=ast.Attribute(
-                    value=ast.Call(
-                        func=ast.Attribute(
-                            value=ast.Name(id='pl', ctx=ast.Load()),
-                            attr='all',
-                            ctx=ast.Load()
-                        ),
-                        args=[],
-                        keywords=[]
+                raise TranslationError("No mapping for groupby.agg")
+        # Fallback for simple aggregations (sum, mean, etc.)
+        self.needs_polars_import = True
+        agg_exprs = [ast.Call(
+            func=ast.Attribute(
+                value=ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Name(id='pl', ctx=ast.Load()),
+                        attr='all',
+                        ctx=ast.Load()
                     ),
-                    attr=agg_method,
-                    ctx=ast.Load()
+                    args=[],
+                    keywords=[]
                 ),
-                args=[],
-                keywords=[]
-            )]
-
+                attr=agg_method,
+                ctx=ast.Load()
+            ),
+            args=[],
+            keywords=[]
+        )]
         final_node = ast.Call(
             func=ast.Attribute(
                 value=transformed_groupby,
                 attr='agg',
                 ctx=ast.Load()
             ),
-            args=[ast.List(elts=agg_exprs, ctx=ast.Load()) if len(agg_exprs) > 1 else agg_exprs[0]],
+            args=[agg_exprs[0]],
             keywords=[]
         )
         return final_node
