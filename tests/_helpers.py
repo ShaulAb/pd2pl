@@ -329,7 +329,7 @@ def compare_dataframe_ops(
         pd_dtype = sorted_pl_from_pd[col_name].dtype
         pl_dtype = sorted_pl_result[col_name].dtype
         # Check if pandas result is float while polars is integer
-        if pd_dtype == pl.Float64 and pl_dtype in pl.INTEGER_DTYPES:
+        if pd_dtype == pl.Float64 and pl_dtype.is_integer():
             cols_to_cast.append(col_name)
 
     if cols_to_cast:
