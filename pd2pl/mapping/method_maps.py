@@ -187,7 +187,8 @@ SUPPORTED_PIVOT_AGG = {
 }
 
 def _transform_pivot_table_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
-    """Transform pivot_table arguments to polars pivot parameters.
+    """
+    Transform pivot_table arguments to polars pivot parameters.
 
     Handles:
     - Mapping index, columns, values.
@@ -207,7 +208,7 @@ def _transform_pivot_table_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
              # Or: logger.warning(f"Ignoring unsupported pivot_table parameter: {arg}")
 
     # Map core arguments
-    for pd_arg, pl_arg in [('index', 'index'), ('columns', 'columns'), ('values', 'values')]:
+    for pd_arg, pl_arg in [('index', 'index'), ('columns', 'on'), ('values', 'values')]:
         if pd_arg in kwargs:
             pivot_kwargs[pl_arg] = kwargs[pd_arg]
         elif pd_arg == 'values' and pd_arg not in kwargs:
@@ -217,8 +218,9 @@ def _transform_pivot_table_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
     aggfunc_node = kwargs.get('aggfunc', ast.Constant(value='mean')) # Default to mean
     if isinstance(aggfunc_node, ast.Constant) and isinstance(aggfunc_node.value, str):
         aggfunc_str = aggfunc_node.value
+        aggfunc_out = 'len' if aggfunc_str == 'count' else aggfunc_str
         if aggfunc_str in SUPPORTED_PIVOT_AGG:
-             pivot_kwargs['aggregate_function'] = aggfunc_node
+             pivot_kwargs['aggregate_function'] = ast.Constant(value=aggfunc_out)
         else:
              raise TranslationError(f"Unsupported pivot_table aggfunc string: '{aggfunc_str}'")
     else:
@@ -583,7 +585,7 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
         category=MethodCategory.RESHAPE,
         argument_map={
             'index': 'index',
-            'columns': 'columns',
+            'columns': 'on',
             'values': 'values', # TODO: Handle case where values is None (needs schema info)
         },
         # No method_chain needed for now, relies on explicit 'values'
