@@ -85,7 +85,7 @@ def test_multiagg_dict_style(df_groupby_multiagg):
     translated = translate_code(pandas_code)
     assert_translation(translated, expected_polars)
     # Polars output is flat, Pandas is MultiIndex; compare only values
-    assert compare_frames(pandas_code, translated, df_groupby_multiagg, ignore_column_names=True)
+    assert compare_frames(pandas_code, translated, df_groupby_multiagg, values_only=True)
 
 def test_multiagg_dict_mixed(df_groupby_multiagg):
     pandas_code = "df.groupby('key').agg({'col1': ['sum', 'mean'], 'col2': 'min'})"
@@ -96,7 +96,7 @@ def test_multiagg_dict_mixed(df_groupby_multiagg):
     )
     translated = translate_code(pandas_code)
     assert_translation(translated, expected_polars)
-    assert compare_frames(pandas_code, translated, df_groupby_multiagg, ignore_column_names=True)
+    assert compare_frames(pandas_code, translated, df_groupby_multiagg, values_only=True)
 
 def test_multiagg_named_style(df_groupby_multiagg):
     pandas_code = (
@@ -122,13 +122,14 @@ def test_multiagg_non_numeric(df_groupby_multiagg):
         "df_pl.group_by('key').agg([pl.col('col1').sum().alias('col1_sum'), "
         "pl.col('col1').mean().alias('col1_mean'), "
         "pl.col('col2').min().alias('col2_min'), "
-        "pl.col('col2').max().alias('col2_max')])"
+        "pl.col('col2').max().alias('col2_max'), "
+        "pl.col('non_numeric').sum().alias('non_numeric_sum')])"
     )
     translated = translate_code(pandas_code)
     assert_translation(translated, expected_polars)
     # Pandas will error or skip non-numeric; skip frame comparison if error
     import pytest
     try:
-        assert compare_frames(pandas_code, translated, df_groupby_multiagg, ignore_column_names=True)
+        assert compare_frames(pandas_code, translated, df_groupby_multiagg, values_only=True)
     except Exception as e:
         pytest.skip(f"Skipping frame comparison for non-numeric aggregation: {e}") 
