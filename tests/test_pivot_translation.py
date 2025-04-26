@@ -22,37 +22,37 @@ def long_df_unique():
         # Basic pivot with single index, columns, values (Uses correct names: idx, col, val)
         (
             "df.pivot(index='idx', columns='col', values='val')",
-            "df_pl.pivot(index='idx', columns='col', values='val')"
+            "df_pl.pivot(index='idx', on='col', values='val')"
         ),
         # List index, single columns, single values (FIXED: Use ['idx'] instead of ['i1', 'i2'])
         (
             "df.pivot(index=['idx'], columns='col', values='val')",
-            "df_pl.pivot(index=['idx'], columns='col', values='val')"
+            "df_pl.pivot(index=['idx'], on='col', values='val')"
         ),
         # Single index, list columns, single values (FIXED: Use ['col'] instead of ['c1', 'c2'])
         (
             "df.pivot(index='idx', columns=['col'], values='val')",
-            "df_pl.pivot(index='idx', columns=['col'], values='val')"
+            "df_pl.pivot(index='idx', on=['col'], values='val')"
         ),
         # Single index, single columns, list values (Uses correct names: idx, col, ['v1', 'v2'])
         (
             "df.pivot(index='idx', columns='col', values=['v1', 'v2'])",
-            "df_pl.pivot(index='idx', columns='col', values=['v1', 'v2'])"
+            "df_pl.pivot(index='idx', on='col', values=['v1', 'v2'])"
         ),
         # All list arguments (FIXED: Use ['idx'], ['col'], ['v1', 'v2'])
         (
             "df.pivot(index=['idx'], columns=['col'], values=['v1', 'v2'])",
-            "df_pl.pivot(index=['idx'], columns=['col'], values=['v1', 'v2'])"
+            "df_pl.pivot(index=['idx'], on=['col'], values=['v1', 'v2'])"
         ),
         # Test a different argument order (Uses correct names: val, col, idx)
         (
             "df.pivot(values='val', columns='col', index='idx')",
-            "df_pl.pivot(values='val', columns='col', index='idx')"
+            "df_pl.pivot(values='val', on='col', index='idx')"
         ),
         # Case added during previous planning (already uses correct names)
         (
             "df.pivot(index=['idx'], columns=['col'], values=['val'])",
-            "df_pl.pivot(index=['idx'], columns=['col'], values=['val'])"
+            "df_pl.pivot(index=['idx'], on=['col'], values=['val'])"
         ),
     ]
 )
