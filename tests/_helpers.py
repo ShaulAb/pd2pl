@@ -79,7 +79,7 @@ def execute_code_snippet(code_string: str, namespace: dict) -> Any:
     except Exception as e:
         raise RuntimeError(f"Error executing final statement/expression: {e}\nCode: {code_string}") from e
 
-def compare_frames(pandas_expr: str, polars_expr: str, df: pd.DataFrame) -> bool:
+def compare_frames(pandas_expr: str, polars_expr: str, df: pd.DataFrame, values_only: bool = False) -> bool:
     """
     Apply two expressions on a dataframe and compare the result.
 
@@ -87,6 +87,7 @@ def compare_frames(pandas_expr: str, polars_expr: str, df: pd.DataFrame) -> bool
         pandas_expr: The expression to evaluate on the pandas DataFrame.
         polars_expr: The expression to evaluate on the polars DataFrame.
         df: The input dataframe to evaluate the expressions on.
+        values_only: If True, compare only values and index, flattening MultiIndex columns to col_agg names.
 
     Returns:
         True if the resulting dataframes are equal, False otherwise.
@@ -127,6 +128,24 @@ def compare_frames(pandas_expr: str, polars_expr: str, df: pd.DataFrame) -> bool
     # Compare shapes
     if pandas_result.shape != polars_result.shape:
         return f"Shape mismatch: Pandas shape={pandas_result.shape}, Polars shape={polars_result.shape}"
+
+    if values_only:
+        # Flatten MultiIndex columns in pandas_result to col_agg names
+        if isinstance(pandas_result.columns, pd.MultiIndex):
+            pandas_result = pandas_result.copy()
+            pandas_result.columns = [
+                f"{col[0]}_{col[1]}" if col[1] else str(col[0])
+                for col in pandas_result.columns.values
+            ]
+        # Reset index for both
+        pandas_result = pandas_result.reset_index(drop=True)
+        polars_result = polars_result.reset_index(drop=True)
+        # Compare values and index only
+        return (
+            pandas_result.shape == polars_result.shape and
+            pandas_result.index.equals(polars_result.index) and
+            np.allclose(pandas_result.values, polars_result.values, equal_nan=True)
+        )
 
     # TODO: consider removing this check , columns should not be modified   
     if pandas_result.columns.tolist() != polars_result.columns.tolist():
