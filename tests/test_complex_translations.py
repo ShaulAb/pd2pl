@@ -37,7 +37,7 @@ class TestGroupByOperations:
 
     def test_groupby_multiple_aggs(self, complex_df, assert_translation):
         pandas_code = "df.groupby('category').agg({'value': 'mean', 'count': 'sum'})"
-        expected_polars = "df_pl.group_by('category').agg([pl.col('value').mean(), pl.col('count').sum()])"
+        expected_polars = "df_pl.group_by('category').agg([pl.col('value').mean().alias('value_mean'), pl.col('count').sum().alias('count_sum')])"
         translated = translate_code(pandas_code)
         assert_translation(translated, expected_polars)
         assert compare_frames(pandas_code, translated, complex_df)
