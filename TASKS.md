@@ -12,16 +12,24 @@ These operations are commonly used in data analysis workflows and should be impl
   - [x] `isin` filtering
   - [x] `isna`/`notna` filtering
   - [x] String contains/startswith/endswith filtering
+- [x] Assignment & Chaining
+  - [x] Robust DataFrame variable propagation in assignments and chains (hybrid AST+astroid approach)
+  - [x] Fallback to astroid for ambiguous or complex assignment cases
+- [x] Dtype Conversion
+  - [x] Robust, extensible dtype mapping system implemented
+  - [x] Supports: category, int, float, boolean dtypes (including extension dtypes)
+  - [x] Handles .astype(), Series/DataFrame creation with dtype
+  - [x] Comprehensive tests implemented and passing
+  - [x] **Special-case constructor translation (e.g., pd.Categorical to pl.Series with dtype=pl.Categorical) implemented using callable/factory mapping**
 
 - [ ] Aggregation Methods
-  - [ ] Complete GroupBy operations
-    - [ ] Multiple column groupby
-    - [ ] Named aggregations
-    - [ ] Custom aggregation functions
+  - [x] Complete GroupBy operations
+    - [x] Multiple column groupby
+    - [x] Named aggregations
+    - [x] Custom aggregation functions / lambda functions
   - [ ] Window Functions
     - [ ] Complete rolling operations
     - [ ] Complete expanding operations
-    - [ ] Custom window functions
 
 ## Medium Priority
 
@@ -32,7 +40,7 @@ Common but less critical operations:
     - [ ] Boolean indexing
     - [ ] Label-based indexing
     - [ ] Integer-based indexing
-  - [ ] Column Modification
+  - [x] Column Modification
     - [x] `rename`
     - [x] `drop`
 
@@ -40,6 +48,7 @@ Common but less critical operations:
   - [x] `sort_values`
   - [x] `sample`
   - [x] `drop_duplicates`
+  - [ ] `drop_na`
   - [ ] `reset_index`
   - [ ] `set_index`
 
@@ -57,6 +66,7 @@ Less commonly used but still important features:
   - [ ] `concat`
 
 - [ ] DateTime Operations
+  - [ ] `date_range`
   - [ ] Date components (year, month, day)
   - [ ] Time components (hour, minute, second)
   - [ ] Date arithmetic
@@ -70,6 +80,12 @@ Less commonly used but still important features:
 
 
 ## Implementation Notes
+
+- Assignment and chain translation is now robust via a hybrid AST+astroid approach:
+  - Simple assignments and method chains are handled by AST logic.
+  - Ambiguous or complex assignments fall back to astroid for type inference and DataFrame detection.
+  - This ensures correct DataFrame variable propagation and `_pl` suffixing in both simple and complex cases.
+- **Special-case constructor translation (e.g., pd.Categorical) is now handled via callables in mapping/dtype_maps.py, making it easy to extend for future cases.**
 
 For each feature, we need to:
 1. Add test cases in `tests/test_complex_translations.py` or create new test files
