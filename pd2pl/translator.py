@@ -2,10 +2,18 @@
 import ast
 from typing import Any, Dict, Optional, Set, Union, List
 from enum import Enum
+import importlib.util
+import logging
 
 from .errors import UnsupportedPandasUsageError, TranslationError
 from .mapping import function_maps, method_maps, FUNCTION_TRANSLATIONS
 from .logging import logger
+
+try:
+    import astroid
+    ASTROID_AVAILABLE = True
+except ImportError:
+    ASTROID_AVAILABLE = False
 
 
 class PandasToPolarsTransformer(ast.NodeTransformer):
@@ -572,4 +580,129 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                  return filter_call
 
         return self.generic_visit(node) 
+    
+    def is_polars_dataframe_creator_call(self, node):
+        """
+        Returns True if node is a call to pl.read_csv or pl.DataFrame
+        """
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == 'pl'
+            and node.func.attr in {'read_csv', 'DataFrame'}
+        )
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST:
+        rhs = node.value
+        new_df_vars = set()
+        # Hybrid logic: AST for simple, astroid for complex
+        # 1. Direct pandas DataFrame-creating function call
+        if is_pandas_dataframe_creator_call(rhs, self.pandas_aliases):
+            # Rewrite to polars
+            rewritten_rhs = rewrite_chain_base_to_polars(rhs, self.pandas_aliases)
+            rhs = rewritten_rhs if rewritten_rhs is not None else rhs
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    new_df_vars.add(target.id)
+            new_targets = [ast.Name(id=f"{t.id}_pl", ctx=ast.Store()) if isinstance(t, ast.Name) else t for t in node.targets]
+            for t, orig in zip(new_targets, node.targets):
+                ast.copy_location(t, orig)
+            ast.copy_location(rhs, rhs)
+            new_assign = ast.Assign(targets=new_targets, value=rhs)
+            ast.copy_location(new_assign, node)
+            self.dataframe_vars.update(new_df_vars)
+            return new_assign
+        # 2. Simple method call on known DataFrame variable
+        elif is_method_call_on_known_df(rhs, self.dataframe_vars):
+            rhs = self.visit(rhs)
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    new_df_vars.add(target.id)
+            new_targets = [ast.Name(id=f"{t.id}_pl", ctx=ast.Store()) if isinstance(t, ast.Name) else t for t in node.targets]
+            for t, orig in zip(new_targets, node.targets):
+                ast.copy_location(t, orig)
+            ast.copy_location(rhs, rhs)
+            new_assign = ast.Assign(targets=new_targets, value=rhs)
+            ast.copy_location(new_assign, node)
+            self.dataframe_vars.update(new_df_vars)
+            return new_assign
+        # 3. Fallback: use astroid for ambiguous/complex cases
+        rhs = self.visit(rhs)
+        if ASTROID_AVAILABLE:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    if is_dataframe_var_astroid(target.id, node):
+                        new_df_vars.add(target.id)
+                        logging.warning(f"[pd2pl] astroid fallback: detected DataFrame variable '{target.id}'")
+        self.dataframe_vars.update(new_df_vars)
+        return self.generic_visit(node)
+
+def rewrite_chain_base_to_polars(node, pandas_aliases):
+    """
+    Recursively rewrite the base of a method chain if it is a DataFrame-creating function (e.g., pd.read_csv).
+    Returns a new AST node with the base rewritten, or None if not applicable.
+    """
+    # If node is a call to pd.read_csv or pd.DataFrame
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+        if node.func.value.id in pandas_aliases and node.func.attr in {'read_csv', 'DataFrame'}:
+            # Rewrite to pl.read_csv or pl.DataFrame
+            new_call = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id='pl', ctx=ast.Load()),
+                    attr=node.func.attr,
+                    ctx=ast.Load()
+                ),
+                args=node.args,
+                keywords=node.keywords
+            )
+            ast.copy_location(new_call, node)
+            return new_call
+    # If node is a method chain, recursively rewrite the base
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        base = node.func.value
+        rewritten_base = rewrite_chain_base_to_polars(base, pandas_aliases)
+        if rewritten_base is not None:
+            # Rebuild the call with the rewritten base
+            new_func = ast.Attribute(
+                value=rewritten_base,
+                attr=node.func.attr,
+                ctx=ast.Load()
+            )
+            ast.copy_location(new_func, node.func)
+            new_call = ast.Call(
+                func=new_func,
+                args=node.args,
+                keywords=node.keywords
+            )
+            ast.copy_location(new_call, node)
+            return new_call
+    return None
+
+# Utility: astroid fallback for DataFrame detection (stub for now)
+def is_dataframe_var_astroid(var_name, assign_node):
+    if not ASTROID_AVAILABLE:
+        return False
+    # This is a stub. Real implementation would use astroid to infer type.
+    # For now, always return False.
+    return False
+
+# Utility: detect direct pandas DataFrame-creating function calls
+def is_pandas_dataframe_creator_call(node, pandas_aliases):
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in pandas_aliases
+        and node.func.attr in {'read_csv', 'DataFrame'}
+    )
+
+# Utility: detect method call on known DataFrame variable
+def is_method_call_on_known_df(node, known_df_vars):
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in known_df_vars
+    )
     
