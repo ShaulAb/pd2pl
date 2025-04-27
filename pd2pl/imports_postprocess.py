@@ -96,4 +96,7 @@ def process_imports(
     result = '\n'.join(code_lines)
     if format_with_black:
         result = _format_with_black(result)
+    # Ensure import datetime if datetime.datetime is used
+    if 'datetime.datetime' in code and 'import datetime' not in code:
+        result = 'import datetime\n' + result
     return result 
