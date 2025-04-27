@@ -33,6 +33,7 @@ def translate_code(pandas_code: str, postprocess_imports: bool = False, format_o
     
     try:
         tree = ast.parse(pandas_code)
+        logger.debug("AST structure:\n" + ast.dump(tree, indent=2))
     except SyntaxError as e:
         logger.error(f"Failed to parse pandas code: {e}")
         raise ParsingError("Invalid pandas code provided") from e
