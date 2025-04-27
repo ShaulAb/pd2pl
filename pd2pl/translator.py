@@ -8,7 +8,7 @@ import logging
 from .errors import UnsupportedPandasUsageError, TranslationError
 from .mapping import function_maps, method_maps, FUNCTION_TRANSLATIONS
 from .logging import logger
-from .mapping.dtype_maps import to_polars_dtype
+from .mapping.dtype_maps import to_polars_dtype, CONSTRUCTOR_MAP
 
 try:
     import astroid
@@ -36,7 +36,61 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         return node
         
     def visit_Call(self, node: ast.Call) -> ast.AST:
-        """Visit a function call node and transform pandas functions to polars."""
+        # If already a polars call, just visit args/keywords and return
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == 'pl':
+            new_args = [self.visit(arg) for arg in node.args]
+            new_keywords = [ast.keyword(arg=kw.arg, value=self.visit(kw.value)) for kw in node.keywords]
+            new_call = ast.Call(
+                func=node.func,
+                args=new_args,
+                keywords=new_keywords
+            )
+            ast.copy_location(new_call, node)
+            return new_call
+        # If numpy call, just visit args/keywords and return
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == 'np':
+            new_args = [self.visit(arg) for arg in node.args]
+            new_keywords = [ast.keyword(arg=kw.arg, value=self.visit(kw.value)) for kw in node.keywords]
+            new_call = ast.Call(
+                func=node.func,
+                args=new_args,
+                keywords=new_keywords
+            )
+            ast.copy_location(new_call, node)
+            return new_call
+        func_repr = None
+        if isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name):
+                func_repr = f"{node.func.value.id}.{node.func.attr}"
+            else:
+                func_repr = f"<complex>.{node.func.attr}"
+        elif isinstance(node.func, ast.Name):
+            func_repr = node.func.id
+        logger.debug(f"visit_Call: visiting {func_repr}")
+        # Handle known constructor calls (e.g., pd.Categorical([...]))
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            mod = node.func.value.id
+            attr = node.func.attr
+            logger.debug(f"visit_Call: checking CONSTRUCTOR_MAP for ({mod}, {attr})")
+            if (mod, attr) in CONSTRUCTOR_MAP:
+                mapping = CONSTRUCTOR_MAP[(mod, attr)]
+                logger.debug(f"visit_Call: matched CONSTRUCTOR_MAP for ({mod}, {attr}) -> {mapping}")
+                if callable(mapping):
+                    return mapping(node, context=self)
+                else:
+                    target_mod, target_attr = mapping
+                    new_func = ast.Attribute(
+                        value=ast.Name(id=target_mod, ctx=ast.Load()),
+                        attr=target_attr,
+                        ctx=ast.Load()
+                    )
+                    new_call = ast.Call(
+                        func=new_func,
+                        args=[self.visit(arg) for arg in node.args],
+                        keywords=[ast.keyword(arg=kw.arg, value=self.visit(kw.value)) for kw in node.keywords]
+                    )
+                    ast.copy_location(new_call, node)
+                    return new_call
         # Handle pd.Series(..., dtype='category') and pd.DataFrame(..., dtype='category')
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
             if node.func.value.id in self.pandas_aliases and node.func.attr in {'Series', 'DataFrame'}:
@@ -52,13 +106,15 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                                 attr=node.func.attr,
                                 ctx=ast.Load()
                             )
+                            # RECURSIVELY VISIT ALL ARGS AND KEYWORDS
+                            new_args = [self.visit(arg) for arg in node.args]
                             new_keywords = [
-                                ast.keyword(arg='dtype', value=polars_dtype) if k.arg == 'dtype' else k
+                                ast.keyword(arg='dtype', value=polars_dtype) if k.arg == 'dtype' else ast.keyword(arg=k.arg, value=self.visit(k.value))
                                 for k in node.keywords
                             ]
                             new_call = ast.Call(
                                 func=new_func,
-                                args=node.args,
+                                args=new_args,
                                 keywords=new_keywords
                             )
                             ast.copy_location(new_call, node)
@@ -648,6 +704,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             # Rewrite to polars
             rewritten_rhs = rewrite_chain_base_to_polars(rhs, self.pandas_aliases)
             rhs = rewritten_rhs if rewritten_rhs is not None else rhs
+            rhs = self.visit(rhs)  # Ensure recursive visiting of new rhs
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     new_df_vars.add(target.id)
@@ -674,15 +731,17 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             self.dataframe_vars.update(new_df_vars)
             return new_assign
         # 3. Fallback: use astroid for ambiguous/complex cases
-        rhs = self.visit(rhs)
-        if ASTROID_AVAILABLE:
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    if is_dataframe_var_astroid(target.id, node):
-                        new_df_vars.add(target.id)
-                        logging.warning(f"[pd2pl] astroid fallback: detected DataFrame variable '{target.id}'")
-        self.dataframe_vars.update(new_df_vars)
-        return self.generic_visit(node)
+        result = self.generic_visit(node)
+        return result
+
+    def visit_Dict(self, node: ast.Dict) -> ast.AST:
+        logger.debug(f"visit_Dict: keys={node.keys}, values={node.values}")
+        new_keys = [self.visit(key) for key in node.keys]
+        new_values = [self.visit(value) for value in node.values]
+        logger.debug(f"visit_Dict: transformed keys={new_keys}, values={new_values}")
+        new_dict = ast.Dict(keys=new_keys, values=new_values)
+        ast.copy_location(new_dict, node)
+        return new_dict
 
 def rewrite_chain_base_to_polars(node, pandas_aliases):
     """
