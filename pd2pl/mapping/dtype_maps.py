@@ -33,6 +33,28 @@ _DTYPE_MAP = {
     'boolean': ast.Attribute(value=ast.Name(id='pl', ctx=ast.Load()), attr='Boolean', ctx=ast.Load()),
 }
 
+def handle_categorical(node, context=None):
+    """
+    Transform pd.Categorical([...]) to pl.Series(values=[...], dtype=pl.Categorical)
+    """
+    values_arg = node.args[0] if node.args else None
+    return ast.Call(
+        func=ast.Attribute(value=ast.Name(id='pl', ctx=ast.Load()), attr='Series', ctx=ast.Load()),
+        args=[],
+        keywords=[
+            ast.keyword(arg='values', value=values_arg),
+            ast.keyword(arg='dtype', value=ast.Attribute(value=ast.Name(id='pl', ctx=ast.Load()), attr='Categorical', ctx=ast.Load())),
+        ]
+    )
+
+# Map (module, attribute) to (target_module, target_attribute) for constructor translation
+# or to a handler function for special cases
+CONSTRUCTOR_MAP = {
+    ('pd', 'Categorical'): handle_categorical,
+    ('pd', 'Timestamp'): ('datetime', 'datetime'),
+    # Add more as needed
+}
+
 def to_polars_dtype(pandas_dtype):
     """
     Map a pandas dtype string (or numpy dtype) to a Polars dtype AST node.
