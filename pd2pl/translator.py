@@ -8,6 +8,7 @@ import logging
 from .errors import UnsupportedPandasUsageError, TranslationError
 from .mapping import function_maps, method_maps, FUNCTION_TRANSLATIONS
 from .logging import logger
+from .mapping.dtype_maps import to_polars_dtype
 
 try:
     import astroid
@@ -36,6 +37,51 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         
     def visit_Call(self, node: ast.Call) -> ast.AST:
         """Visit a function call node and transform pandas functions to polars."""
+        # Handle pd.Series(..., dtype='category') and pd.DataFrame(..., dtype='category')
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            if node.func.value.id in self.pandas_aliases and node.func.attr in {'Series', 'DataFrame'}:
+                # Look for dtype keyword
+                for kw in node.keywords:
+                    if kw.arg == 'dtype':
+                        polars_dtype = to_polars_dtype(kw.value)
+                        if polars_dtype is not None:
+                            self.needs_polars_import = True
+                            # Replace pd.Series/DataFrame with pl.Series/DataFrame and dtype=pl.Categorical
+                            new_func = ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr=node.func.attr,
+                                ctx=ast.Load()
+                            )
+                            new_keywords = [
+                                ast.keyword(arg='dtype', value=polars_dtype) if k.arg == 'dtype' else k
+                                for k in node.keywords
+                            ]
+                            new_call = ast.Call(
+                                func=new_func,
+                                args=node.args,
+                                keywords=new_keywords
+                            )
+                            ast.copy_location(new_call, node)
+                            return new_call
+        # Handle astype('category') and similar dtype conversions
+        if isinstance(node.func, ast.Attribute) and node.func.attr == 'astype':
+            # e.g., df['col'].astype('category')
+            if node.args:
+                polars_dtype = to_polars_dtype(node.args[0])
+                if polars_dtype is not None:
+                    self.needs_polars_import = True
+                    # Replace astype('category') with cast(pl.Categorical)
+                    new_call = ast.Call(
+                        func=ast.Attribute(
+                            value=self.visit(node.func.value),
+                            attr='cast',
+                            ctx=ast.Load()
+                        ),
+                        args=[polars_dtype],
+                        keywords=[]
+                    )
+                    ast.copy_location(new_call, node)
+                    return new_call
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
             base_name = node.func.value.id
             func_name = node.func.attr
