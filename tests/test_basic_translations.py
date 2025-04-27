@@ -96,6 +96,18 @@ class TestBasicOperations:
         assert_translation(translated, expected_polars)
         assert compare_frames(pandas_code, translated, df_mixed_types)
 
+    def test_arbitrary_dataframe_name(self, df_mixed_types, assert_translation):
+        pandas_code = "foo = pd.read_csv('data.csv')\nfoo.head(2)"
+        expected_polars = "foo_pl = pl.read_csv('data.csv')\nfoo_pl.head(2)"
+        translated = translate_code(pandas_code)
+        assert_translation(translated, expected_polars)
+
+    def test_chained_assignment_dataframe(self, df_mixed_types, assert_translation):
+        pandas_code = "mydf = pd.read_csv('data.csv')\nresult = mydf.head(3)\nresult.sum()"
+        expected_polars = "mydf_pl = pl.read_csv('data.csv')\nresult_pl = mydf_pl.head(3)\nresult_pl.sum()"
+        translated = translate_code(pandas_code)
+        assert_translation(translated, expected_polars)
+
 class TestColumnOperations:
     """Test column selection and operations."""
 
