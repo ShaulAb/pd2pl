@@ -5,6 +5,7 @@ import polars as pl
 import numpy as np
 from pathlib import Path
 from loguru import logger
+from pd2pl.config import TranslationConfig
 
 from pd2pl.logging import setup_logging
 
@@ -117,3 +118,9 @@ def assert_translation():
         # Strip potential import line before normalizing and comparing
         assert normalize_quotes(strip_import_lines(translated)) == normalize_quotes(expected)
     return _assert 
+
+@pytest.fixture(autouse=True)
+def set_rename_dataframe_true():
+    TranslationConfig.set(rename_dataframe=True)
+    yield
+    TranslationConfig.reset() 
