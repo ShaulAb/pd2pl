@@ -20,8 +20,9 @@ except ImportError:
 class PandasToPolarsTransformer(ast.NodeTransformer):
     """AST transformer that converts pandas operations to polars operations."""
     
-    def __init__(self):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__()
+        self.config = config or {}
         self.dataframe_vars: Set[str] = {'df', 'df_left', 'df_right', 'df_right_diffkey'}
         self.pandas_aliases: Set[str] = {'pd', 'pandas'}
         self.needs_polars_import = False
@@ -29,10 +30,11 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         self.in_filter_context = False
         
     def visit_Name(self, node: ast.Name) -> ast.Name:
-        """Visit a name node and transform DataFrame variable names."""
+        """Visit a name node and transform DataFrame/Series variable names if configured."""
         if node.id in self.dataframe_vars:
-            transformed_name = f"{node.id}_pl"
-            return ast.Name(id=transformed_name, ctx=node.ctx)
+            if self.config.get('rename_dataframe', False):
+                transformed_name = f"{node.id}_pl"
+                return ast.Name(id=transformed_name, ctx=node.ctx)
         return node
         
     def visit_Call(self, node: ast.Call) -> ast.AST:
@@ -344,7 +346,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             args_dict = self._args_to_dict(node)
             chain = translation.method_chain(node.args, args_dict)
             if chain:
-                current_node = ast.Name(id=f"{var_name}_pl", ctx=ast.Load())
+                current_node = ast.Name(id=f"{var_name}_pl", ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id=var_name, ctx=ast.Load())
                 for method, args, kwargs in chain:
                     current_node = ast.Call(
                         func=ast.Attribute(
@@ -360,7 +362,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
         new_node = ast.Call(
             func=ast.Attribute(
-                value=ast.Name(id=f"{var_name}_pl", ctx=ast.Load()),
+                value=ast.Name(id=f"{var_name}_pl", ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id=var_name, ctx=ast.Load()),
                 attr=translation.polars_method,
                 ctx=ast.Load()
             ),
@@ -422,7 +424,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
         return ast.Call(
             func=ast.Attribute(
-                value=ast.Name(id='df_pl', ctx=ast.Load()),
+                value=ast.Name(id='df_pl', ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id='df', ctx=ast.Load()),
                 attr='select',
                 ctx=ast.Load()
             ),
@@ -456,7 +458,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
             return ast.Call(
                 func=ast.Attribute(
-                    value=ast.Name(id='df_pl', ctx=ast.Load()),
+                    value=ast.Name(id='df_pl', ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id='df', ctx=ast.Load()),
                     attr='select',
                     ctx=ast.Load()
                 ),
@@ -494,7 +496,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
             return ast.Call(
                 func=ast.Attribute(
-                    value=ast.Name(id='df_pl', ctx=ast.Load()),
+                    value=ast.Name(id='df_pl', ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id='df', ctx=ast.Load()),
                     attr='select',
                     ctx=ast.Load()
                 ),
@@ -574,7 +576,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
         return ast.Call(
             func=ast.Attribute(
-                value=ast.Name(id='df_pl', ctx=ast.Load()),
+                value=ast.Name(id='df_pl', ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id='df', ctx=ast.Load()),
                 attr='select',
                 ctx=ast.Load()
             ),
@@ -708,7 +710,10 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     new_df_vars.add(target.id)
-            new_targets = [ast.Name(id=f"{t.id}_pl", ctx=ast.Store()) if isinstance(t, ast.Name) else t for t in node.targets]
+            new_targets = [
+                ast.Name(id=f"{t.id}_pl", ctx=ast.Store()) if isinstance(t, ast.Name) and self.config.get('rename_dataframe', False) else t
+                for t in node.targets
+            ]
             for t, orig in zip(new_targets, node.targets):
                 ast.copy_location(t, orig)
             ast.copy_location(rhs, rhs)
@@ -722,7 +727,10 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     new_df_vars.add(target.id)
-            new_targets = [ast.Name(id=f"{t.id}_pl", ctx=ast.Store()) if isinstance(t, ast.Name) else t for t in node.targets]
+            new_targets = [
+                ast.Name(id=f"{t.id}_pl", ctx=ast.Store()) if isinstance(t, ast.Name) and self.config.get('rename_dataframe', False) else t
+                for t in node.targets
+            ]
             for t, orig in zip(new_targets, node.targets):
                 ast.copy_location(t, orig)
             ast.copy_location(rhs, rhs)
