@@ -10,16 +10,18 @@ from .errors import (
 )
 from .logging import logger
 from .imports_postprocess import process_imports
+from .config import TranslationConfig
 
 __version__ = "0.1.0"
 
-def translate_code(pandas_code: str, postprocess_imports: bool = False, format_output: bool = False) -> str:
+def translate_code(pandas_code: str, postprocess_imports: bool = False, format_output: bool = False, config: dict = None) -> str:
     """Translate a snippet of pandas code to its polars equivalent.
     
     Args:
         pandas_code: String containing pandas code to translate
         postprocess_imports: If True, add/deduplicate polars imports in the output (default False)
         format_output: If True, format the output code with Black (default False)
+        config: Optional configuration dictionary for the translator
         
     Returns:
         str: Translated polars code
@@ -38,7 +40,8 @@ def translate_code(pandas_code: str, postprocess_imports: bool = False, format_o
         logger.error(f"Failed to parse pandas code: {e}")
         raise ParsingError("Invalid pandas code provided") from e
 
-    transformer = PandasToPolarsTransformer()
+    effective_config = config or TranslationConfig.get_config()
+    transformer = PandasToPolarsTransformer(config=effective_config)
     try:
         logger.debug(f">>> translate_code: About to visit AST tree: {repr(tree)}")
         new_tree = transformer.visit(tree)
