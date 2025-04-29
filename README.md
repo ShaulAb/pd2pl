@@ -71,3 +71,23 @@ To run the test suite, use the following command:
 ```bash
 pytest tests/
 ```
+
+## Configuration
+
+You can control translation options globally or per translation. For example, to enable DataFrame/Series renaming (appending '_pl' to variable names):
+
+```python
+from pd2pl.config import set_config, TranslationConfig
+set_config(rename_dataframe=True)  # Enable renaming globally
+# ...
+TranslationConfig.reset()  # Reset to defaults
+```
+
+Or override for a single translation:
+
+```python
+from pd2pl import translate_code
+polars_code = translate_code(pandas_code, config={"rename_dataframe": True})
+```
+
+By default, variable names are kept as-is.
