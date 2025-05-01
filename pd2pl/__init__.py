@@ -31,7 +31,7 @@ def translate_code(pandas_code: str, postprocess_imports: bool = False, format_o
         UnsupportedPandasUsageError: If the code uses unsupported pandas features
         TranslationError: If the code cannot be translated for other reasons
     """
-    logger.info(f"Original pandas code:\n{textwrap.indent(pandas_code, '  ')}")
+    logger.debug(f"Original pandas code:\n{textwrap.indent(pandas_code, '  ')}")
     
     try:
         tree = ast.parse(pandas_code)
