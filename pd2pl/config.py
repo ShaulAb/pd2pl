@@ -1,8 +1,26 @@
+from dataclasses import dataclass
+from typing import Optional, Union
+from .import_strategy import ImportStrategy
+
+@dataclass
 class TranslationConfig:
     """
-    Global configuration for pandas-to-polars translation.
-    Use set(), reset(), and get_config() to manage options.
+    Configuration for pandas to polars translation.
+    
+    Attributes:
+        import_strategy: Strategy for handling imports during translation
+        postprocess_imports: Whether to postprocess imports (deprecated, use import_strategy instead)
+        format_output: Whether to format the output code
     """
+    import_strategy: Union[ImportStrategy, str] = ImportStrategy.AUTO
+    postprocess_imports: bool = True  # For backward compatibility
+    format_output: bool = True
+
+    def __post_init__(self):
+        """Validate configuration values."""
+        if isinstance(self.import_strategy, str):
+            self.import_strategy = ImportStrategy.from_string(self.import_strategy)
+
     _defaults = {
         "rename_dataframe": False,  # Default: keep variable names as-is
         "verbosity": 1,             # Default: normal verbosity

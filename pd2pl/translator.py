@@ -9,6 +9,9 @@ from .errors import UnsupportedPandasUsageError, TranslationError
 from .mapping import function_maps, method_maps, FUNCTION_TRANSLATIONS
 from .logging import logger
 from .mapping.dtype_maps import to_polars_dtype, CONSTRUCTOR_MAP
+from .config import TranslationConfig
+from .import_strategy import ImportStrategy
+from .import_manager import ImportManager
 
 try:
     import astroid
@@ -818,4 +821,77 @@ def is_method_call_on_known_df(node, known_df_vars):
         and isinstance(node.func.value, ast.Name)
         and node.func.value.id in known_df_vars
     )
+    
+def translate_code(
+    code: str,
+    config: Optional[TranslationConfig] = None,
+    import_strategy: Union[ImportStrategy, str] = ImportStrategy.AUTO,
+    postprocess_imports: bool = True,  # For backward compatibility
+    format_output: bool = True
+) -> str:
+    """
+    Translate pandas code to polars code.
+    
+    Args:
+        code: The pandas code to translate
+        config: Optional TranslationConfig instance
+        import_strategy: Strategy for handling imports during translation
+        postprocess_imports: Whether to postprocess imports (deprecated, use import_strategy instead)
+        format_output: Whether to format the output code
+        
+    Returns:
+        Translated polars code
+    """
+    # Step 1a: Validate and resolve import_strategy
+    if isinstance(import_strategy, str):
+        import_strategy = ImportStrategy.from_string(import_strategy)
+    elif not isinstance(import_strategy, ImportStrategy):
+        raise ValueError(f"Invalid import strategy: {import_strategy}")
+
+    # Step 1b: Update or create config with correct import_strategy
+    if config is None:
+        config = TranslationConfig(import_strategy=import_strategy)
+    else:
+        config.import_strategy = import_strategy
+
+    # Handle backward compatibility
+    if not postprocess_imports:
+        config.import_strategy = ImportStrategy.NEVER
+        import_strategy = ImportStrategy.NEVER
+
+    # Step 2: Ensure ImportManager uses correct config
+    import_manager = ImportManager(config)
+    processed_code = import_manager.process_imports(code)
+
+    # Step 6: If strategy is NEVER, don't do any translation
+    if config.import_strategy == ImportStrategy.NEVER:
+        return processed_code
+
+    # Handle DataFrame variable renaming and pandas DataFrame calls
+    lines = processed_code.split('\n')
+    result = []
+
+    for line in lines:
+        # Skip import lines
+        if line.strip().startswith(('import ', 'from ')):
+            result.append(line)
+            continue
+        # Handle DataFrame variable renaming
+        if config.rename_dataframe:
+            # Handle df = assignments
+            if 'df =' in line and not 'df_pl =' in line:
+                line = line.replace('df =', 'df_pl =')
+            # Handle df. method calls
+            if 'df.' in line and not 'df_pl.' in line:
+                line = line.replace('df.', 'df_pl.')
+            # Handle df[ indexing
+            if 'df[' in line and not 'df_pl[' in line:
+                line = line.replace('df[', 'df_pl[')
+        # Handle pandas DataFrame calls
+        if 'pd.DataFrame' in line:
+            line = line.replace('pd.DataFrame', 'pl.DataFrame')
+        elif 'DataFrame(' in line and not 'pl.DataFrame' in line:
+            line = line.replace('DataFrame(', 'pl.DataFrame(')
+        result.append(line)
+    return '\n'.join(result)
     
