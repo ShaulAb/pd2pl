@@ -35,14 +35,19 @@ git clone <repository-url>
 cd <repository-name>
 ```
 
-2. Install dependencies:
+2. Install core dependencies (for translation only):
 ```bash
-# Using uv (recommended)
-uv pip install -r requirements.txt
-
-# Or using pip
-pip install -r requirements.txt
+pip install .
 ```
+
+- **Note:** You do NOT need pandas or polars installed to use the translation functionality.
+
+3. (For contributors and testing) Install development dependencies:
+```bash
+pip install .[dev]
+```
+
+- This will install pandas, polars, and all tools required for testing and development.
 
 ## Project Structure
 
@@ -67,7 +72,7 @@ pandas_to_polars_translator/
 
 ## Testing
 
-To run the test suite, use the following command:
+To run the test suite, ensure you have installed the dev dependencies, then use:
 ```bash
 pytest tests/
 ```
@@ -91,3 +96,24 @@ polars_code = translate_code(pandas_code, config={"rename_dataframe": True})
 ```
 
 By default, variable names are kept as-is.
+
+### Import Strategy
+
+You can now control how imports are handled in the translated code using the `import_strategy` option. This can be set globally, per translation, or via the CLI:
+
+**Available strategies:**
+- `"always"`: Always add required polars imports and remove pandas imports.
+- `"never"`: Never add or modify imports, even if needed.
+- `"auto"` (default): Add imports only if the translation logic determines they are needed.
+- `"preserve"`: Preserve existing import structure, only replacing pandas imports with polars if needed.
+
+**Python usage:**
+```python
+from pd2pl.imports_postprocess import ImportStrategy
+polars_code = translate_code(pandas_code, config={"import_strategy": ImportStrategy.ALWAYS})
+```
+
+**CLI usage:**
+```bash
+cat myscript.py | pd2pl --import-strategy always
+```
