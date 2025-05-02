@@ -3,16 +3,30 @@ import argparse
 import traceback
 
 from pd2pl import translate_code
+from pd2pl.imports_postprocess import ImportStrategy
 
 def main():
     parser = argparse.ArgumentParser(description="Translate Pandas code to Polars code.")
     parser.add_argument('--format', action='store_true', help='Format the output code')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
+    parser.add_argument('--import-strategy', choices=['always', 'never', 'auto', 'preserve'], default='auto',
+                        help='Import handling strategy: always, never, auto, preserve (default: auto)')
     args = parser.parse_args()
 
     try:
         input_code = sys.stdin.read()
-        config = {"format": args.format, "debug": args.debug}
+        # Map CLI string to ImportStrategy enum
+        strategy_map = {
+            'always': ImportStrategy.ALWAYS,
+            'never': ImportStrategy.NEVER,
+            'auto': ImportStrategy.AUTO,
+            'preserve': ImportStrategy.PRESERVE
+        }
+        config = {
+            "format": args.format,
+            "debug": args.debug,
+            "import_strategy": strategy_map[args.import_strategy]
+        }
         result = translate_code(input_code, config=config)
         print(result)
     except Exception as e:

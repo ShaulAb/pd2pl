@@ -41,6 +41,7 @@ def translate_code(pandas_code: str, postprocess_imports: bool = False, format_o
         raise ParsingError("Invalid pandas code provided") from e
 
     effective_config = config or TranslationConfig.get_config()
+    import_strategy = effective_config.get('import_strategy', TranslationConfig._defaults['import_strategy'])
     transformer = PandasToPolarsTransformer(config=effective_config)
     try:
         logger.debug(f">>> translate_code: About to visit AST tree: {repr(tree)}")
@@ -49,18 +50,27 @@ def translate_code(pandas_code: str, postprocess_imports: bool = False, format_o
         logger.error(f"Error during AST transformation: {e}", exc_info=True)
         raise
     
-    # Add required imports
-    imports = []
-    if getattr(transformer, 'needs_polars_import', False):
-        imports.append("import polars as pl")
-    if getattr(transformer, 'needs_selector_import', False):
-        imports.append("import polars.selectors as cs")
-    
     polars_code = ast.unparse(new_tree)
     
     if postprocess_imports:
-        polars_code = process_imports(polars_code)
-    if format_output:
+        # If ALWAYS, force both flags True to match strategy semantics
+        if import_strategy.name == 'ALWAYS':
+            polars_code = process_imports(
+                polars_code,
+                import_strategy=import_strategy,
+                needs_polars_import=True,
+                needs_selector_import=True,
+                format_output=format_output
+            )  # Force both imports for ALWAYS strategy
+        else:
+            polars_code = process_imports(
+                polars_code,
+                import_strategy=import_strategy,
+                needs_polars_import=getattr(transformer, 'needs_polars_import', False),
+                needs_selector_import=getattr(transformer, 'needs_selector_import', False),
+                format_output=format_output
+            )
+    elif format_output:
         try:
             import black
             polars_code = black.format_str(polars_code, mode=black.FileMode())

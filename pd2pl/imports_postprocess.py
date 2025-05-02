@@ -1,5 +1,12 @@
 import re
 from typing import List
+from enum import Enum, auto
+
+class ImportStrategy(Enum):
+    ALWAYS = auto()
+    NEVER = auto()
+    AUTO = auto()
+    PRESERVE = auto()
 
 def _has_import(code_lines: List[str], import_stmt: str) -> bool:
     return any(line.strip() == import_stmt for line in code_lines)
@@ -44,7 +51,7 @@ def _deduplicate_imports(code_lines: List[str]) -> List[str]:
 def _remove_pandas_import(code_lines: List[str]) -> List[str]:
     return [line for line in code_lines if not re.match(r'\s*import\s+pandas\s+as\s+pd', line)]
 
-def _format_with_black(code: str) -> str:
+def _format_output(code: str) -> str:
     try:
         import black
         return black.format_str(code, mode=black.Mode())
@@ -57,46 +64,124 @@ def _format_with_black(code: str) -> str:
 
 def process_imports(
     code: str,
-    add_polars_imports: bool = True,
-    deduplicate_imports: bool = True,
-    remove_pandas_import: bool = False,
-    format_with_black: bool = False
+    import_strategy: ImportStrategy = ImportStrategy.AUTO,
+    needs_polars_import: bool = False,
+    needs_selector_import: bool = False,
+    format_output: bool = False
 ) -> str:
     """
-    Post-processes code to manage import statements.
-    - Adds 'import polars as pl' and 'import polars.selectors as cs' if missing (if add_polars_imports is True)
-    - Deduplicates import statements (if deduplicate_imports is True)
-    - Removes 'import pandas as pd' (if remove_pandas_import is True)
-    - Ensures a blank line after imports for readability
-    - Optionally formats code with Black (if format_with_black is True)
+    Post-processes code to manage import statements according to the selected strategy.
+    """
+    STRATEGY_HANDLERS = {
+        ImportStrategy.ALWAYS: _process_always_strategy,
+        ImportStrategy.NEVER: _process_never_strategy,
+        ImportStrategy.AUTO: _process_auto_strategy,
+        ImportStrategy.PRESERVE: _process_preserve_strategy,
+    }
+    handler = STRATEGY_HANDLERS[import_strategy]
+    return handler(
+        code,
+        needs_polars_import=needs_polars_import,
+        needs_selector_import=needs_selector_import,
+        format_output=format_output
+    )
+
+def _process_always_strategy(code, needs_polars_import=False, needs_selector_import=False, format_output=False):
+    """
+    Always add required polars imports, deduplicate, remove pandas, format if requested.
     """
     code_lines = code.splitlines()
     imports_to_add = []
-    if add_polars_imports:
-        if not _has_import(code_lines, 'import polars as pl'):
-            imports_to_add.append('import polars as pl')
-        if not _has_import(code_lines, 'import polars.selectors as cs'):
-            imports_to_add.append('import polars.selectors as cs')
+    # Always add polars imports
+    if not _has_import(code_lines, 'import polars as pl'):
+        imports_to_add.append('import polars as pl')
+    if needs_selector_import and not _has_import(code_lines, 'import polars.selectors as cs'):
+        imports_to_add.append('import polars.selectors as cs')
     if imports_to_add:
         insert_idx = _find_import_insertion_index(code_lines)
         code_lines = code_lines[:insert_idx] + imports_to_add + code_lines[insert_idx:]
-    if remove_pandas_import:
-        code_lines = _remove_pandas_import(code_lines)
-    if deduplicate_imports:
-        code_lines = _deduplicate_imports(code_lines)
+    # Remove pandas import
+    code_lines = _remove_pandas_import(code_lines)
+    # Deduplicate imports
+    code_lines = _deduplicate_imports(code_lines)
     # Ensure a single blank line after the last import (if any imports present)
     last_import_idx = -1
     for idx, line in enumerate(code_lines):
         if line.strip().startswith('import') or line.strip().startswith('from'):
             last_import_idx = idx
     if last_import_idx != -1 and last_import_idx + 1 < len(code_lines):
-        # Only add a blank line if not already present
         if code_lines[last_import_idx + 1].strip() != '':
             code_lines.insert(last_import_idx + 1, '')
     result = '\n'.join(code_lines)
-    if format_with_black:
-        result = _format_with_black(result)
+    if format_output:
+        result = _format_output(result)
     # Ensure import datetime if datetime.datetime is used
-    if 'datetime.datetime' in code and 'import datetime' not in code:
+    if 'datetime.datetime' in result and 'import datetime' not in result:
+        result = 'import datetime\n' + result
+    return result
+
+def _process_never_strategy(code, **kwargs):
+    """
+    Never add or modify imports, return code unchanged.
+    """
+    # Never add or modify imports
+    return code
+
+def _process_auto_strategy(code, needs_polars_import=False, needs_selector_import=False, format_output=False):
+    """
+    Add polars imports only if needed, deduplicate, remove pandas, format if requested.
+    """
+    code_lines = code.splitlines()
+    imports_to_add = []
+    if needs_polars_import and not _has_import(code_lines, 'import polars as pl'):
+        imports_to_add.append('import polars as pl')
+    if needs_selector_import and not _has_import(code_lines, 'import polars.selectors as cs'):
+        imports_to_add.append('import polars.selectors as cs')
+    if imports_to_add:
+        insert_idx = _find_import_insertion_index(code_lines)
+        code_lines = code_lines[:insert_idx] + imports_to_add + code_lines[insert_idx:]
+    code_lines = _remove_pandas_import(code_lines)
+    code_lines = _deduplicate_imports(code_lines)
+    last_import_idx = -1
+    for idx, line in enumerate(code_lines):
+        if line.strip().startswith('import') or line.strip().startswith('from'):
+            last_import_idx = idx
+    if last_import_idx != -1 and last_import_idx + 1 < len(code_lines):
+        if code_lines[last_import_idx + 1].strip() != '':
+            code_lines.insert(last_import_idx + 1, '')
+    result = '\n'.join(code_lines)
+    if format_output:
+        result = _format_output(result)
+    if 'datetime.datetime' in result and 'import datetime' not in result:
+        result = 'import datetime\n' + result
+    return result
+
+def _process_preserve_strategy(code, needs_polars_import=False, needs_selector_import=False, format_output=False):
+    """
+    Preserve all existing imports, but replace pandas import with polars if needed. Do not deduplicate or remove other imports. Format if requested.
+    """
+    code_lines = code.splitlines()
+    new_code_lines = []
+    pandas_import_pattern = re.compile(r'\s*import\s+pandas\s+as\s+pd')
+    polars_added = False
+    selectors_added = False
+    for line in code_lines:
+        if pandas_import_pattern.match(line):
+            if needs_polars_import or needs_selector_import:
+                if needs_polars_import and not polars_added:
+                    new_code_lines.append('import polars as pl')
+                    polars_added = True
+                if needs_selector_import and not selectors_added:
+                    new_code_lines.append('import polars.selectors as cs')
+                    selectors_added = True
+                # Do not add the pandas import
+            else:
+                new_code_lines.append(line)  # Preserve pandas import
+        else:
+            new_code_lines.append(line)
+    result = '\n'.join(new_code_lines)
+    if format_output:
+        result = _format_output(result)
+    if 'datetime.datetime' in result and 'import datetime' not in result:
         result = 'import datetime\n' + result
     return result 
