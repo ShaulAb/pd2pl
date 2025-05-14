@@ -117,3 +117,12 @@ polars_code = translate_code(pandas_code, config={"import_strategy": ImportStrat
 ```bash
 cat myscript.py | pd2pl --import-strategy always
 ```
+
+## Import Handling Behavior
+
+When using the CLI or Python API, import strategies (such as 'always', 'never', 'auto', 'preserve') control how Pandas and Polars import lines are managed in the translated code. **Import post-processing is only applied if translation is actually performed.**
+
+- If your code does not require translation (e.g., it does not use Pandas DataFrame features), the code will be left unchanged, regardless of the import strategy selected.
+- If translation is performed, the import strategy will be applied as described in the documentation.
+
+This behavior ensures that code is only modified when necessary, avoiding unnecessary changes to import lines in code that does not require translation.

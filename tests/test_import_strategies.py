@@ -72,6 +72,15 @@ def test_auto_strategy_adds_only_if_needed():
     assert 'import polars as pl' in result2
     assert 'import polars.selectors as cs' in result2
 
+def test_auto_strategy_real_usecase():
+    code = "import pandas as pd\nimport numpy as np\n\nd = {'col1': [1, 2], 'col2': [3, 4]}\ndf = pd.DataFrame(data=d)"
+    # Should not add imports if flags are False
+    result = process_imports(
+        code,
+        import_strategy=ImportStrategy.AUTO,
+    )
+    assert 'import polars as pl' not in result
+
 def test_preserve_strategy_replaces_pandas_only_if_needed():
     code = "import pandas as pd\nprint('hi')"
     # Should preserve pandas if not needed
@@ -82,14 +91,14 @@ def test_preserve_strategy_replaces_pandas_only_if_needed():
         needs_selector_import=False
     )
     assert 'import pandas as pd' in result
-    # Should replace pandas if polars needed
+    # Should preserve pandas and add polars if polars is needed
     result2 = process_imports(
         code,
         import_strategy=ImportStrategy.PRESERVE,
         needs_polars_import=True,
         needs_selector_import=False
     )
-    assert 'import pandas as pd' not in result2
+    assert 'import pandas as pd' in result2
     assert 'import polars as pl' in result2
 
 def test_preserve_strategy_preserves_comments_and_docstrings():
