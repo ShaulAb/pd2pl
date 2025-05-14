@@ -1,7 +1,7 @@
 """Test sort operation translations."""
 import pytest
-from pd2pl import translate_code
 
+from tests.conftest import translate_test_code
 @pytest.mark.parametrize(
     "pandas_code,expected_polars",
     [
@@ -59,7 +59,7 @@ from pd2pl import translate_code
 )
 def test_sort_translations(pandas_code, expected_polars):
     """Test the translation of pandas sort_values to polars sort."""
-    assert translate_code(pandas_code.strip()) == expected_polars.strip()
+    assert translate_test_code(pandas_code.strip()) == expected_polars.strip()
 
 class TestComplexSortExpressions:
     """Test sorting with complex expressions.

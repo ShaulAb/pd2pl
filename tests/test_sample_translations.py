@@ -1,7 +1,7 @@
 # tests/test_sample_translations.py
 import pytest
-from pd2pl import translate_code
 
+from tests.conftest import translate_test_code
 @pytest.mark.parametrize(
     "pandas_code, expected_polars",
     [
@@ -69,4 +69,4 @@ from pd2pl import translate_code
 )
 def test_sample_translations(pandas_code, expected_polars):
     """Test the translation of pandas sample to polars sample."""
-    assert translate_code(pandas_code.strip()) == expected_polars.strip() 
+    assert translate_test_code(pandas_code.strip()) == expected_polars.strip() 

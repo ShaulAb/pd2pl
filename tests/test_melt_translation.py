@@ -2,8 +2,9 @@
 import pytest
 import pandas as pd
 import polars as pl
-from pd2pl import translate_code
+
 from tests._helpers import compare_frames
+from tests.conftest import translate_test_code
 
 @pytest.fixture
 def wide_df():
@@ -62,7 +63,7 @@ def wide_df():
 )
 def test_melt_translations(pandas_code, expected_polars, wide_df):
     """Test the translation and functional equivalence of pandas melt to polars unpivot."""
-    translated_polars = translate_code(pandas_code.strip())
+    translated_polars = translate_test_code(pandas_code.strip())
     assert translated_polars == expected_polars.strip()
     assert compare_frames(pandas_code.strip(), translated_polars, wide_df), \
            f"DataFrame comparison failed for:\nPandas: {pandas_code}\nPolars: {translated_polars}" 

@@ -1,6 +1,7 @@
 """Test rename operation translations."""
 import pytest
-from pd2pl import translate_code
+
+from tests.conftest import translate_test_code
 
 @pytest.mark.parametrize(
     "pandas_code,expected_polars",
@@ -29,7 +30,7 @@ from pd2pl import translate_code
 )
 def test_rename_translations(pandas_code, expected_polars):
     """Test the translation of pandas rename to polars rename."""
-    assert translate_code(pandas_code.strip()) == expected_polars.strip()
+    assert translate_test_code(pandas_code.strip()) == expected_polars.strip()
 
 class TestComplexRenameExpressions:
     """Test renaming with complex expressions.

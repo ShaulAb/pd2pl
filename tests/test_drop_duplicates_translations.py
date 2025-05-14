@@ -1,5 +1,6 @@
 import pytest
 from pd2pl import translate_code
+from tests.conftest import translate_test_code
 
 @pytest.mark.parametrize(
     "pandas_code, expected_polars",
@@ -65,4 +66,4 @@ def test_drop_duplicates_translations(pandas_code, expected_polars):
     """Test the translation of pandas drop_duplicates to polars unique."""
     # Note: For inplace=True, the test checks the generated expression,
     # not the surrounding assignment handled by the main translator visitor.
-    assert translate_code(pandas_code.strip()) == expected_polars.strip() 
+    assert translate_test_code(pandas_code.strip()) == expected_polars.strip() 

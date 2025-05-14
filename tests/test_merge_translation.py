@@ -2,8 +2,9 @@
 import pytest
 import pandas as pd
 import polars as pl
-from pd2pl import translate_code, TranslationError
+from pd2pl import TranslationError
 from ._helpers import compare_dataframe_ops # IMPORT HELPER
+from tests.conftest import translate_test_code
 
 @pytest.fixture
 def df_left():
@@ -38,7 +39,7 @@ def df_right_diffkey():
 )
 def test_merge_column_join_translations(pandas_code, expected_polars_method_call, df_left, df_right, df_right_diffkey):
     """Test translation and functional equivalence of column-based pd.merge to df.join."""
-    translated_code = translate_code(pandas_code)
+    translated_code = translate_test_code(pandas_code)
 
     # 1. Check generated code syntax
     expected_full_code = f"df_left_pl{expected_polars_method_call}"
@@ -58,15 +59,15 @@ def test_merge_unsupported_index_join():
     pd_code_right = "pd.merge(df_left, df_right, left_on='key', right_index=True)"
     pd_code_both = "pd.merge(df_left, df_right, left_index=True, right_index=True)"
     with pytest.raises(TranslationError, match="Index joins .* not yet supported"):
-        translate_code(pd_code_left)
+        translate_test_code(pd_code_left)
     with pytest.raises(TranslationError, match="Index joins .* not yet supported"):
-        translate_code(pd_code_right)
+        translate_test_code(pd_code_right)
     with pytest.raises(TranslationError, match="Index joins .* not yet supported"):
-        translate_code(pd_code_both)
+        translate_test_code(pd_code_both)
 
 def test_merge_unsupported_lsuffix():
     """Test that lsuffix raises TranslationError."""
     pd_code = "pd.merge(df_left, df_right, on='key', suffixes=('_L', '_R'))"
     # Use slightly less strict regex to match the error message
     with pytest.raises(TranslationError, match="lsuffix .* is not supported"): # MODIFIED
-        translate_code(pd_code) 
+        translate_test_code(pd_code) 

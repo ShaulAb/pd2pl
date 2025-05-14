@@ -1,8 +1,8 @@
 import pytest
 import pandas as pd
 import polars as pl
-from pd2pl import translate_code
 from tests._helpers import compare_frames
+from tests.conftest import translate_test_code
 
 @pytest.fixture
 def df_groupby_mixed():
@@ -30,7 +30,7 @@ def assert_translation(translated, expected):
 def test_single_column_groupby_builtin_aggs(df_groupby_mixed, agg_func):
     pandas_code = f"df.groupby('cat1').{agg_func}()"
     expected_polars = f"df_pl.group_by('cat1').agg(pl.all().{agg_func}())"
-    translated = translate_code(pandas_code)
+    translated = translate_test_code(pandas_code)
     assert_translation(translated, expected_polars)
     # Only compare frames for mean/median if pandas does not error (i.e., only numeric columns)
     if agg_func in ["mean", "median"]:
@@ -48,7 +48,7 @@ def test_single_column_groupby_builtin_aggs(df_groupby_mixed, agg_func):
 def test_multi_column_groupby_builtin_aggs(df_groupby_mixed, agg_func):
     pandas_code = f"df.groupby(['cat1', 'cat2']).{agg_func}()"
     expected_polars = f"df_pl.group_by(['cat1', 'cat2']).agg(pl.all().{agg_func}())"
-    translated = translate_code(pandas_code)
+    translated = translate_test_code(pandas_code)
     assert_translation(translated, expected_polars)
     assert compare_frames(pandas_code, translated, df_groupby_mixed)
 
@@ -58,7 +58,7 @@ def test_named_aggregation_dict_style(df_groupby_mixed):
         "df_pl.group_by('cat1').agg([pl.col('val1').sum().alias('val1_sum'), "
         "pl.col('val2').mean().alias('val2_mean')])"
     )
-    translated = translate_code(pandas_code)
+    translated = translate_test_code(pandas_code)
     assert_translation(translated, expected_polars)
     assert compare_frames(pandas_code, translated, df_groupby_mixed)
 
@@ -70,7 +70,7 @@ def test_named_aggregation_tuple_style(df_groupby_mixed):
         "df_pl.group_by('cat1').agg([pl.col('val1').sum().alias('val1_sum'), "
         "pl.col('val2').mean().alias('val2_mean')])"
     )
-    translated = translate_code(pandas_code)
+    translated = translate_test_code(pandas_code)
     assert_translation(translated, expected_polars)
     assert compare_frames(pandas_code, translated, df_groupby_mixed)
 
@@ -82,7 +82,7 @@ def test_multiagg_dict_style(df_groupby_multiagg):
         "pl.col('col2').min().alias('col2_min'), "
         "pl.col('col2').max().alias('col2_max')])"
     )
-    translated = translate_code(pandas_code)
+    translated = translate_test_code(pandas_code)
     assert_translation(translated, expected_polars)
     # Polars output is flat, Pandas is MultiIndex; compare only values
     assert compare_frames(pandas_code, translated, df_groupby_multiagg, values_only=True)
@@ -94,7 +94,7 @@ def test_multiagg_dict_mixed(df_groupby_multiagg):
         "pl.col('col1').mean().alias('col1_mean'), "
         "pl.col('col2').min().alias('col2_min')])"
     )
-    translated = translate_code(pandas_code)
+    translated = translate_test_code(pandas_code)
     assert_translation(translated, expected_polars)
     assert compare_frames(pandas_code, translated, df_groupby_multiagg, values_only=True)
 
@@ -112,7 +112,7 @@ def test_multiagg_named_style(df_groupby_multiagg):
         "pl.col('col2').min().alias('min_col2'), "
         "pl.col('col2').max().alias('max_col2')])"
     )
-    translated = translate_code(pandas_code)
+    translated = translate_test_code(pandas_code)
     assert_translation(translated, expected_polars)
     assert compare_frames(pandas_code, translated, df_groupby_multiagg)
 
@@ -125,7 +125,7 @@ def test_multiagg_non_numeric(df_groupby_multiagg):
         "pl.col('col2').max().alias('col2_max'), "
         "pl.col('non_numeric').sum().alias('non_numeric_sum')])"
     )
-    translated = translate_code(pandas_code)
+    translated = translate_test_code(pandas_code)
     assert_translation(translated, expected_polars)
     # Pandas will error or skip non-numeric; skip frame comparison if error
     import pytest

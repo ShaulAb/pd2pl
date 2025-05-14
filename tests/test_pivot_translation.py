@@ -2,8 +2,9 @@
 import pytest
 import pandas as pd
 import polars as pl
-from pd2pl import translate_code
+
 from tests._helpers import compare_frames
+from tests.conftest import translate_test_code
 
 @pytest.fixture
 def long_df_unique():
@@ -60,7 +61,7 @@ def test_pivot_translations(pandas_code, expected_polars, long_df_unique):
     """Test the translation and functional equivalence of pandas pivot to polars pivot."""
     # Note: This assumes 'values' is always explicitly provided in pandas call.
     # Polars uses aggregate_function='first' by default.
-    translated_polars = translate_code(pandas_code.strip())
+    translated_polars = translate_test_code(pandas_code.strip())
     assert translated_polars == expected_polars.strip()
     # Add functional comparison
     assert compare_frames(pandas_code.strip(), translated_polars, long_df_unique), \
