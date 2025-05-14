@@ -158,7 +158,7 @@ def _process_auto_strategy(code, needs_polars_import=False, needs_selector_impor
 
 def _process_preserve_strategy(code, needs_polars_import=False, needs_selector_import=False, format_output=False):
     """
-    Preserve all existing imports, but replace pandas import with polars if needed. Do not deduplicate or remove other imports. Format if requested.
+    Preserve all existing imports, including pandas, even if unused. Only add polars imports if needed, but never remove or replace pandas import.
     """
     code_lines = code.splitlines()
     new_code_lines = []
@@ -166,22 +166,21 @@ def _process_preserve_strategy(code, needs_polars_import=False, needs_selector_i
     polars_added = False
     selectors_added = False
     for line in code_lines:
+        # Always preserve pandas import
         if pandas_import_pattern.match(line):
-            if needs_polars_import or needs_selector_import:
-                if needs_polars_import and not polars_added:
-                    new_code_lines.append('import polars as pl')
-                    polars_added = True
-                if needs_selector_import and not selectors_added:
-                    new_code_lines.append('import polars.selectors as cs')
-                    selectors_added = True
-                # Do not add the pandas import
-            else:
-                new_code_lines.append(line)  # Preserve pandas import
-        else:
             new_code_lines.append(line)
+            continue
+        new_code_lines.append(line)
+    # Add polars imports if needed, but do not remove pandas
+    insert_idx = _find_import_insertion_index(new_code_lines)
+    imports_to_add = []
+    if needs_polars_import and not _has_import(new_code_lines, 'import polars as pl'):
+        imports_to_add.append('import polars as pl')
+    if needs_selector_import and not _has_import(new_code_lines, 'import polars.selectors as cs'):
+        imports_to_add.append('import polars.selectors as cs')
+    if imports_to_add:
+        new_code_lines = new_code_lines[:insert_idx] + imports_to_add + new_code_lines[insert_idx:]
     result = '\n'.join(new_code_lines)
     if format_output:
         result = _format_output(result)
-    if 'datetime.datetime' in result and 'import datetime' not in result:
-        result = 'import datetime\n' + result
     return result 

@@ -705,6 +705,9 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         if is_pandas_dataframe_creator_call(rhs, self.pandas_aliases):
             # Rewrite to polars
             rewritten_rhs = rewrite_chain_base_to_polars(rhs, self.pandas_aliases)
+            if rewritten_rhs is not None:
+                # If we rewrote to pl.DataFrame/pl.Series, set needs_polars_import
+                self.needs_polars_import = True  # Ensure AUTO strategy adds import
             rhs = rewritten_rhs if rewritten_rhs is not None else rhs
             rhs = self.visit(rhs)  # Ensure recursive visiting of new rhs
             for target in node.targets:
