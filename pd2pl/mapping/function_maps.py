@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import ast
 from pd2pl.errors import TranslationError
 from pd2pl.logging import logger
+from pd2pl.mapping.date_maps import translate_date_range
 
 # Add type hinting for visitor if using explicit signature
 if TYPE_CHECKING:
@@ -118,6 +119,17 @@ PANDAS_FUNCTION_TRANSLATIONS: Dict[str, FunctionTranslation] = {
             'right_on': 'right_on'
         },
         doc='Merge DataFrames'
+    ),
+    'date_range': FunctionTranslation(
+        polars_function='date_range',
+        argument_map={
+            'start': 'start',
+            'end': 'end',
+            'periods': 'periods',
+            'freq': 'interval',
+            'inclusive': 'closed'
+        },
+        doc='Create a date range'
     )
 }
 
@@ -244,4 +256,5 @@ def translate_merge(node: ast.Call, *, visitor: 'PandasToPolarsVisitor', **kwarg
 # Dictionary to hold function translations
 FUNCTION_TRANSLATIONS: Dict[str, Callable] = {
     'merge': translate_merge,
+    'date_range': translate_date_range,
 } 
