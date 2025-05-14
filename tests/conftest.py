@@ -8,6 +8,39 @@ from loguru import logger
 from pd2pl.config import TranslationConfig
 
 from pd2pl.logging import setup_logging
+from pd2pl import translate_code
+
+def translate_test_code(code, **kwargs):
+    """Wrapper for testing raw translations without import processing.
+    
+    This function is the primary way to test translations in test files.
+    It ensures that import processing is disabled by default, allowing tests
+    to focus on the translation logic without import boilerplate.
+    
+    Args:
+        code (str): The pandas code to translate
+        **kwargs: Additional arguments to pass to translate_code
+        
+    Returns:
+        str: The translated code
+    """
+    kwargs.setdefault('postprocess_imports', False)
+    return translate_code(code, **kwargs)
+
+@pytest.fixture
+def translate_without_import_processing():
+    """Fixture for testing raw translations without import processing.
+    
+    This fixture is the primary way to test translations in test files.
+    It ensures that import processing is disabled by default, allowing tests
+    to focus on the translation logic without import boilerplate.
+    
+    Example:
+        def test_translation(translate_without_import_processing):
+            result = translate_without_import_processing("pd.DataFrame()")
+            assert "pl.DataFrame()" in result
+    """
+    return translate_test_code
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_logging():
