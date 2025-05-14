@@ -174,43 +174,49 @@ def translate_date_range(node: ast.Call, *, visitor: 'PandasToPolarsVisitor', **
     # Handle end/periods
     if 'end' in args:
         keywords.append(ast.keyword(arg='end', value=args['end']))
-    elif 'periods' in args and 'start' in args and 'freq' in args:
-        # Calculate end date from periods
-        if (isinstance(args['freq'], ast.Constant) and 
-            isinstance(args['freq'].value, str) and
-            isinstance(args['periods'], ast.Constant) and 
-            isinstance(args['periods'].value, int)):
-            
-            # Get the start value from the AST
-            start_value = None
-            if isinstance(args['start'], ast.Call):
-                if isinstance(args['start'].func, ast.Name):
-                    if args['start'].func.id == 'date':
-                        start_value = date(
-                            args['start'].args[0].value,
-                            args['start'].args[1].value,
-                            args['start'].args[2].value
-                        )
-                    elif args['start'].func.id == 'datetime':
-                        start_value = datetime(
-                            args['start'].args[0].value,
-                            args['start'].args[1].value,
-                            args['start'].args[2].value,
-                            args['start'].args[3].value if len(args['start'].args) > 3 else 0,
-                            args['start'].args[4].value if len(args['start'].args) > 4 else 0,
-                            args['start'].args[5].value if len(args['start'].args) > 5 else 0
-                        )
-            
-            if start_value is not None:
-                # Calculate the end date using the new period calculation module
-                end_date = calculate_period_end_date(
-                    start_value,
-                    args['periods'].value,
-                    args['freq'].value
-                )
-                # Create AST node for the end date
-                end_node = create_date_ast_node(end_date)
-                keywords.append(ast.keyword(arg='end', value=end_node))
+    elif 'periods' in args and 'start' in args:
+        # For string dates, pass periods directly
+        if isinstance(args['start'], ast.Constant) and isinstance(args['start'].value, str):
+            keywords.append(ast.keyword(arg='periods', value=args['periods']))
+            # Add default interval if freq not specified
+            if 'freq' not in args:
+                keywords.append(ast.keyword(
+                    arg='interval',
+                    value=ast.Constant(value='1d')
+                ))
+        else:
+            # For date/datetime objects, calculate end date
+            if 'freq' in args and isinstance(args['freq'], ast.Constant) and isinstance(args['freq'].value, str):
+                # Get the start value from the AST
+                start_value = None
+                if isinstance(args['start'], ast.Call):
+                    if isinstance(args['start'].func, ast.Name):
+                        if args['start'].func.id == 'date':
+                            start_value = date(
+                                args['start'].args[0].value,
+                                args['start'].args[1].value,
+                                args['start'].args[2].value
+                            )
+                        elif args['start'].func.id == 'datetime':
+                            start_value = datetime(
+                                args['start'].args[0].value,
+                                args['start'].args[1].value,
+                                args['start'].args[2].value,
+                                args['start'].args[3].value if len(args['start'].args) > 3 else 0,
+                                args['start'].args[4].value if len(args['start'].args) > 4 else 0,
+                                args['start'].args[5].value if len(args['start'].args) > 5 else 0
+                            )
+                
+                if start_value is not None:
+                    # Calculate the end date using the new period calculation module
+                    end_date = calculate_period_end_date(
+                        start_value,
+                        args['periods'].value,
+                        args['freq'].value
+                    )
+                    # Create AST node for the end date
+                    end_node = create_date_ast_node(end_date)
+                    keywords.append(ast.keyword(arg='end', value=end_node))
     
     # Handle freq/interval
     if 'freq' in args and isinstance(args['freq'], ast.Constant) and isinstance(args['freq'].value, str):
@@ -227,12 +233,6 @@ def translate_date_range(node: ast.Call, *, visitor: 'PandasToPolarsVisitor', **
             arg='closed',
             value=ast.Constant(value=closed)
         ))
-    
-    # Always add eager=True for pandas compatibility
-    keywords.append(ast.keyword(
-        arg='eager',
-        value=ast.Constant(value=True)
-    ))
     
     # Construct the final call as an AST node
     date_range_call = ast.Call(
