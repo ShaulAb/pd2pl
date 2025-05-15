@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import ast
 from pd2pl.errors import TranslationError
 from pd2pl.logging import logger
-from pd2pl.mapping.date_maps import translate_date_range
+from pd2pl.datetime_utils.transformers import transform_date_range
 
 # Add type hinting for visitor if using explicit signature
 if TYPE_CHECKING:
@@ -252,6 +252,20 @@ def translate_merge(node: ast.Call, *, visitor: 'PandasToPolarsVisitor', **kwarg
     )
 
     return join_call
+
+def translate_date_range(node: ast.Call, *, visitor: 'PandasToPolarsVisitor', **kwargs) -> ast.AST:
+    """
+    Translate pandas date_range call to polars date_range.
+    
+    Args:
+        node: AST node for pandas date_range call
+        visitor: The visitor instance for translating nested elements
+        
+    Returns:
+        AST node for polars date_range call
+    """
+    # Delegate to the implementation in datetime_utils
+    return transform_date_range(node, visitor)
 
 # Dictionary to hold function translations
 FUNCTION_TRANSLATIONS: Dict[str, Callable] = {
