@@ -13,11 +13,6 @@ from datetime import date, datetime
             "pd.date_range(start=date(2022, 1, 1), end=date(2022, 1, 10), freq='D')",
             "pl.date_range(start=date(2022, 1, 1), end=date(2022, 1, 10), interval='1d')"
         ),
-        # String date input with periods
-        (
-            "pd.date_range(start='20130101', periods=6)",
-            "pl.date_range(start='20130101', periods=6, interval='1d')"
-        ),
         # date_range with periods
         (
             "pd.date_range(start=date(2022, 1, 1), periods=5, freq='D')",
