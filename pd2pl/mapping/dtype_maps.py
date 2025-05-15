@@ -47,11 +47,67 @@ def handle_categorical(node, context=None):
         ]
     )
 
+def handle_dataframe_constructor(node, context=None):
+    """
+    Transform pd.DataFrame constructor parameters to polars equivalents.
+    Key mappings:
+    - 'columns' parameter in pandas maps to 'schema' parameter in polars
+    - Other parameters are passed through as-is 
+    
+    This handles cases like:
+    - pd.DataFrame(data, columns=['a', 'b'])
+    - pd.DataFrame(data, columns=['a', 'b'], dtype='int64')
+    """
+    if context:
+        context.needs_polars_import = True
+    
+    # Create new function: pl.DataFrame
+    new_func = ast.Attribute(
+        value=ast.Name(id='pl', ctx=ast.Load()),
+        attr='DataFrame',
+        ctx=ast.Load()
+    )
+    
+    # Process the args (keep the same)
+    new_args = [context.visit(arg) if context else arg for arg in node.args]
+    
+    # Process the keywords, mapping 'columns' to 'schema'
+    new_keywords = []
+    for kw in node.keywords:
+        if kw.arg == 'columns':
+            # Map 'columns' parameter to 'schema' parameter
+            new_keywords.append(
+                ast.keyword(
+                    arg='schema', 
+                    value=context.visit(kw.value) if context else kw.value
+                )
+            )
+        else:
+            # Keep other parameters as-is
+            new_keywords.append(
+                ast.keyword(
+                    arg=kw.arg, 
+                    value=context.visit(kw.value) if context else kw.value
+                )
+            )
+    
+    # Create the new call node
+    new_call = ast.Call(
+        func=new_func,
+        args=new_args,
+        keywords=new_keywords
+    )
+    
+    # Copy source location for better error messages
+    ast.copy_location(new_call, node)
+    return new_call
+
 # Map (module, attribute) to (target_module, target_attribute) for constructor translation
 # or to a handler function for special cases
 CONSTRUCTOR_MAP = {
     ('pd', 'Categorical'): handle_categorical,
     ('pd', 'Timestamp'): ('datetime', 'datetime'),
+    ('pd', 'DataFrame'): handle_dataframe_constructor,
     # Add more as needed
 }
 
