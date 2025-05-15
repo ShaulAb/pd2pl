@@ -1,3 +1,17 @@
+"""
+DEPRECATED: This module is deprecated and will be removed in a future release.
+Its functionality has been moved to pd2pl.datetime_utils subpackage.
+Use pd2pl.datetime_utils.calculator and pd2pl.datetime_utils.transformers instead.
+"""
+
+import warnings
+warnings.warn(
+    "The pd2pl.mapping.date_maps module is deprecated and will be removed in a future release. "
+    "Use pd2pl.datetime_utils subpackage instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 from typing import Dict, Optional, Union, TYPE_CHECKING
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
@@ -149,100 +163,16 @@ def create_date_ast_node(value: Union[datetime, date]) -> ast.Call:
         )
 
 def translate_date_range(node: ast.Call, *, visitor: 'PandasToPolarsVisitor', **kwargs) -> ast.AST:
-    """Translate pandas date_range to polars date_range."""
-    # Extract arguments from the pandas date_range call
-    args = {}
-    for keyword in node.keywords:
-        if keyword.arg == 'start':
-            args['start'] = visitor.visit(keyword.value)
-        elif keyword.arg == 'end':
-            args['end'] = visitor.visit(keyword.value)
-        elif keyword.arg == 'periods':
-            args['periods'] = visitor.visit(keyword.value)
-        elif keyword.arg == 'freq':
-            args['freq'] = keyword.value  # Don't visit this as we need the raw value
-        elif keyword.arg == 'inclusive':
-            args['inclusive'] = keyword.value  # Don't visit this as we need the raw value
-
-    # Build keywords for polars date_range call
-    keywords = []
+    """
+    Translate pandas date_range call to polars date_range.
     
-    # Handle start
-    if 'start' in args:
-        keywords.append(ast.keyword(arg='start', value=args['start']))
-    
-    # Handle end/periods
-    if 'end' in args:
-        keywords.append(ast.keyword(arg='end', value=args['end']))
-    elif 'periods' in args and 'start' in args:
-        # For string dates, pass periods directly
-        if isinstance(args['start'], ast.Constant) and isinstance(args['start'].value, str):
-            keywords.append(ast.keyword(arg='periods', value=args['periods']))
-            # Add default interval if freq not specified
-            if 'freq' not in args:
-                keywords.append(ast.keyword(
-                    arg='interval',
-                    value=ast.Constant(value='1d')
-                ))
-        else:
-            # For date/datetime objects, calculate end date
-            if 'freq' in args and isinstance(args['freq'], ast.Constant) and isinstance(args['freq'].value, str):
-                # Get the start value from the AST
-                start_value = None
-                if isinstance(args['start'], ast.Call):
-                    if isinstance(args['start'].func, ast.Name):
-                        if args['start'].func.id == 'date':
-                            start_value = date(
-                                args['start'].args[0].value,
-                                args['start'].args[1].value,
-                                args['start'].args[2].value
-                            )
-                        elif args['start'].func.id == 'datetime':
-                            start_value = datetime(
-                                args['start'].args[0].value,
-                                args['start'].args[1].value,
-                                args['start'].args[2].value,
-                                args['start'].args[3].value if len(args['start'].args) > 3 else 0,
-                                args['start'].args[4].value if len(args['start'].args) > 4 else 0,
-                                args['start'].args[5].value if len(args['start'].args) > 5 else 0
-                            )
-                
-                if start_value is not None:
-                    # Calculate the end date using the new period calculation module
-                    end_date = calculate_period_end_date(
-                        start_value,
-                        args['periods'].value,
-                        args['freq'].value
-                    )
-                    # Create AST node for the end date
-                    end_node = create_date_ast_node(end_date)
-                    keywords.append(ast.keyword(arg='end', value=end_node))
-    
-    # Handle freq/interval
-    if 'freq' in args and isinstance(args['freq'], ast.Constant) and isinstance(args['freq'].value, str):
-        interval = FREQ_TO_INTERVAL.get(args['freq'].value, '1d')
-        keywords.append(ast.keyword(
-            arg='interval',
-            value=ast.Constant(value=interval)
-        ))
-    
-    # Handle inclusive/closed
-    if 'inclusive' in args and isinstance(args['inclusive'], ast.Constant) and isinstance(args['inclusive'].value, str):
-        closed = INCLUSIVE_TO_CLOSED.get(args['inclusive'].value, 'both')
-        keywords.append(ast.keyword(
-            arg='closed',
-            value=ast.Constant(value=closed)
-        ))
-    
-    # Construct the final call as an AST node
-    date_range_call = ast.Call(
-        func=ast.Attribute(
-            value=ast.Name(id='pl', ctx=ast.Load()),
-            attr='date_range',
-            ctx=ast.Load()
-        ),
-        args=[],
-        keywords=keywords
-    )
-    
-    return date_range_call 
+    Args:
+        node: AST node for pandas date_range call
+        visitor: The visitor instance for translating nested elements
+        
+    Returns:
+        AST node for polars date_range call
+    """
+    # This function delegates to the datetime_utils implementation
+    from pd2pl.datetime_utils.transformers import transform_date_range
+    return transform_date_range(node, visitor) 

@@ -1,3 +1,17 @@
+"""
+DEPRECATED: This module is deprecated and will be removed in a future release.
+Its functionality has been moved to pd2pl.datetime_utils subpackage.
+Use pd2pl.datetime_utils.calculator instead.
+"""
+
+import warnings
+warnings.warn(
+    "The pd2pl.mapping.date_periods module is deprecated and will be removed in a future release. "
+    "Use pd2pl.datetime_utils.calculator instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
 from datetime import datetime, timedelta, date
 from dateutil.relativedelta import relativedelta
 from typing import Union, Dict, Callable
