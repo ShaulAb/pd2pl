@@ -38,6 +38,8 @@ For more complex parts of the system, we have dedicated architecture guides:
 
 *   **Window Function Translation**: [Window Function Translation Guide](./WINDOW_FUNCTION_TRANSLATION.md)
     *   *(This covers the architecture for translating pandas window functions like `rolling()`, `expanding()`, and `ewm()` to their Polars equivalents.)*
+*   **String Operations Translation**: [String Operations Translation Guide](./STRING_OPERATIONS.md)
+    *   *(This covers the architecture for translating pandas string operations accessed through the `.str` accessor to their Polars equivalents.)*
 
 ## 7. Project Documentation
 

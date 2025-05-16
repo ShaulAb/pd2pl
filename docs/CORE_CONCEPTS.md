@@ -57,6 +57,7 @@ This is where the specific translation rules are defined. It's a collection of P
 *   **`dtype_maps.py`**: Translates pandas dtype specifications (e.g., `df.astype('category')`) to Polars dtypes (`df.cast(pl.Categorical)`).
 *   **`constructor_maps.py`**: Translates pandas object constructors (e.g., `pd.Series()`, `pd.DataFrame()`, `pd.Categorical()`) to their Polars equivalents, often involving `pl.Series()`, `pl.DataFrame()`, and specific dtype handling.
 *   **`window_maps.py`**: Provides specialized translation logic for pandas window operations (`.rolling()`, `.expanding()`, `.ewm()`), which often have complex parameter mappings and require careful construction of Polars expressions.
+*   **`string_maps.py`**: Handles translation of pandas string operations accessed through the `.str` accessor (e.g., `df['col'].str.lower()`, `df['col'].str.contains()`), mapping them to their Polars equivalents and transforming their parameters.
 
 **Translation Strategy**: The mapping system aims to produce *idiomatic* Polars code, not just a literal one-to-one translation. This means the generated Polars code should look like code a human Polars user would naturally write.
 
