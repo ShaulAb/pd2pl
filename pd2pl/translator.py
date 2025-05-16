@@ -400,27 +400,84 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
 
         self.needs_polars_import = True
 
-        inner_expr = ast.Call(
-            func=ast.Attribute(
-                value=ast.Attribute(
-                    value=ast.Call(
-                        func=ast.Attribute(
-                            value=ast.Name(id='pl', ctx=ast.Load()),
-                            attr='col',
+        # Apply method_chain transformations if available
+        args_list = node.args
+        kwargs_dict = {kw.arg: kw.value for kw in node.keywords}
+        
+        if translation.method_chain:
+            # Use the method_chain function to transform arguments
+            steps = translation.method_chain(args_list, kwargs_dict)
+            if steps and len(steps) > 0:
+                # We expect a single step for string methods, with transformed args and kwargs
+                method, transformed_args, transformed_kwargs = steps[0]
+                # Create the inner expression with transformed args and kwargs
+                inner_expr = ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Attribute(
+                            value=ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id='pl', ctx=ast.Load()),
+                                    attr='col',
+                                    ctx=ast.Load()
+                                ),
+                                args=[ast.Constant(value=col_name)],
+                                keywords=[]
+                            ),
+                            attr='str',
                             ctx=ast.Load()
                         ),
-                        args=[ast.Constant(value=col_name)],
-                        keywords=[]
+                        attr=translation.polars_method,
+                        ctx=ast.Load()
                     ),
-                    attr='str',
+                    args=transformed_args,
+                    keywords=[ast.keyword(arg=k, value=v) for k, v in transformed_kwargs.items()]
+                )
+            else:
+                # Fallback if method_chain returns empty
+                inner_expr = ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Attribute(
+                            value=ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id='pl', ctx=ast.Load()),
+                                    attr='col',
+                                    ctx=ast.Load()
+                                ),
+                                args=[ast.Constant(value=col_name)],
+                                keywords=[]
+                            ),
+                            attr='str',
+                            ctx=ast.Load()
+                        ),
+                        attr=translation.polars_method,
+                        ctx=ast.Load()
+                    ),
+                    args=node.args,
+                    keywords=node.keywords
+                )
+        else:
+            # No method_chain, use original args and keywords
+            inner_expr = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr='col',
+                                ctx=ast.Load()
+                            ),
+                            args=[ast.Constant(value=col_name)],
+                            keywords=[]
+                        ),
+                        attr='str',
+                        ctx=ast.Load()
+                    ),
+                    attr=translation.polars_method,
                     ctx=ast.Load()
                 ),
-                attr=translation.polars_method,
-                ctx=ast.Load()
-            ),
-            args=node.args,
-            keywords=node.keywords
-        )
+                args=node.args,
+                keywords=node.keywords
+            )
 
         return ast.Call(
             func=ast.Attribute(
