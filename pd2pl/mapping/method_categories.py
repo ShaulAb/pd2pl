@@ -11,6 +11,7 @@ class MethodCategory(Enum):
     WINDOW = 'window'
     BASIC = 'basic'
     RESHAPE = 'reshape'  # Added for melt/pivot etc.
+    STRING_METHODS = 'string'  # Added for string operations
 
 @dataclass
 class ChainableMethodTranslation:

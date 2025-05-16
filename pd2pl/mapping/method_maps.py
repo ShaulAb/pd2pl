@@ -5,6 +5,7 @@ from pd2pl.logging import logger
 from pd2pl.errors import TranslationError
 
 from .method_categories import MethodCategory, ChainableMethodTranslation
+from .string_maps import STRING_METHODS_INFO
 
 def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
     """Transform sort_values arguments to polars sort parameters.
@@ -751,38 +752,7 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
 }
 
 # String method translations
-STRING_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
-    'contains': ChainableMethodTranslation(
-        polars_method='contains',
-        category=MethodCategory.BASIC,
-        doc='Test if pattern or regex is contained within string'
-    ),
-    'len': ChainableMethodTranslation(
-        polars_method='len_chars',
-        category=MethodCategory.BASIC,
-        doc='Return the length of each string as the number of characters'
-    ),
-    'replace': ChainableMethodTranslation(
-        polars_method='replace',
-        category=MethodCategory.BASIC,
-        doc='Replace occurrences of pattern/regex with some other string'
-    ),
-    'lower': ChainableMethodTranslation(
-        polars_method='to_lowercase',
-        category=MethodCategory.BASIC,
-        doc='Convert strings to lowercase'
-    ),
-    'upper': ChainableMethodTranslation(
-        polars_method='to_uppercase',
-        category=MethodCategory.BASIC,
-        doc='Convert strings to uppercase'
-    ),
-    'strip': ChainableMethodTranslation(
-        polars_method='strip',
-        category=MethodCategory.BASIC,
-        doc='Remove leading and trailing whitespace'
-    )
-}
+STRING_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = STRING_METHODS_INFO
 
 # Methods that require special handling beyond simple mapping
 SPECIAL_METHODS = {
