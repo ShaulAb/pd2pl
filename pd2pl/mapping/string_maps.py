@@ -1,7 +1,7 @@
 """
 Mapping system for pandas string operations to polars equivalents.
 """
-from typing import Dict, Any, Callable, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple
 
 from pd2pl.mapping.method_categories import MethodCategory
 
