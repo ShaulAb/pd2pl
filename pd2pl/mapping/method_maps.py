@@ -1,5 +1,5 @@
 """Mapping of pandas DataFrame/Series methods to polars equivalents."""
-from typing import Dict, Any, Optional, Callable, List, Tuple, Union
+from typing import Dict, Any, Optional, List, Tuple
 import ast
 from pd2pl.logging import logger
 from pd2pl.errors import TranslationError
