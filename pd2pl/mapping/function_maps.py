@@ -99,14 +99,10 @@ PANDAS_FUNCTION_TRANSLATIONS: Dict[str, FunctionTranslation] = {
     'concat': FunctionTranslation(
         polars_function='concat',
         argument_map={
-            'objs': 'dfs',
-            'axis': 'how',
+            'objs': 'items',  # First parameter is 'items' in polars
+            'axis': 'how',    # Will be transformed in translate_concat
         },
-        transform_args=lambda args, kwargs: (
-            args,
-            {**kwargs, 'how': 'vertical' if kwargs.get('axis', 0) == 0 else 'horizontal'}
-        ),
-        doc='Concatenate DataFrames'
+        doc='Concatenate DataFrames or Series'
     ),
     'merge': FunctionTranslation(
         polars_function='join',
@@ -154,6 +150,24 @@ def _parse_merge_args(node: ast.Call) -> dict:
     # We need suffixes default to check if lsuffix was explicitly set to non-empty
     # args.setdefault('suffixes', ast.Tuple(elts=[ast.Constant(value='_x'), ast.Constant(value='_y')], ctx=ast.Load()))
 
+    return args
+
+# Parse concat arguments with checks for unsupported features
+def _parse_concat_args(node: ast.Call) -> dict:
+    """Basic parser for pd.concat arguments with validation."""
+    args = {}
+    
+    # Handle first positional argument (objs)
+    if node.args:
+        args['objs'] = node.args[0]
+    
+    # Process keywords
+    for kw in node.keywords:
+        args[kw.arg] = kw.value
+    
+    # Set defaults for parsing
+    args.setdefault('axis', ast.Constant(value=0))
+    
     return args
 
 # Explicitly define visitor type hint
@@ -267,8 +281,71 @@ def translate_date_range(node: ast.Call, *, visitor: 'PandasToPolarsVisitor', **
     # Delegate to the implementation in datetime_utils
     return transform_date_range(node, visitor)
 
+def translate_concat(node: ast.Call, *, visitor: 'PandasToPolarsVisitor', **kwargs) -> ast.AST:
+    """
+    Translate pandas concat call to polars concat.
+    
+    This function handles the translation of pandas.concat() to polars.concat() with
+    appropriate parameter mappings:
+    - 'objs' in pandas -> 'items' in polars (as the first positional argument)
+    - 'axis' in pandas -> 'how' in polars (0/'index' -> 'vertical', 1/'columns' -> 'horizontal')
+    
+    Unsupported parameters in polars will raise a TranslationError.
+    
+    Args:
+        node: AST node for pandas concat call
+        visitor: The visitor instance for translating nested elements
+        
+    Returns:
+        AST node for polars concat call
+    """
+    parsed_args = _parse_concat_args(node)
+    
+    # Get the objs parameter (required)
+    objs_node = parsed_args.get('objs')
+    if objs_node is None:
+        raise TranslationError("Missing required 'objs' parameter in pd.concat call.")
+    
+    # Check for unsupported parameters
+    unsupported_params = ['keys', 'verify_integrity', 'sort', 'names', 'levels', 'join', 'ignore_index']
+    for param in unsupported_params:
+        if param in parsed_args:
+            raise TranslationError(f"{param} parameter is not supported in polars.concat")
+    
+    # Transform the objects node
+    transformed_objs = visitor.visit(objs_node)
+    
+    # Build polars concat keyword arguments
+    concat_kwargs = {}
+    
+    # Handle axis parameter conversion to 'how'
+    axis_node = parsed_args.get('axis', ast.Constant(value=0))
+    if isinstance(axis_node, ast.Constant):
+        axis_value = axis_node.value
+        # Convert to 'how' parameter for polars
+        if axis_value == 1 or axis_value == 'columns':
+            concat_kwargs['how'] = ast.Constant(value='horizontal')
+        # Default is 'vertical', no need to specify for axis=0
+    else:
+        raise TranslationError("axis parameter must be a constant (0, 1, 'index', or 'columns')")
+    
+    # Create the polars concat call
+    # Note: Keep items as a positional argument, not a keyword
+    concat_call = ast.Call(
+        func=ast.Attribute(
+            value=ast.Name(id='pl', ctx=ast.Load()),
+            attr='concat',
+            ctx=ast.Load()
+        ),
+        args=[transformed_objs],  # Items as first positional argument
+        keywords=[ast.keyword(arg=k, value=v) for k, v in concat_kwargs.items()]
+    )
+    
+    return concat_call
+
 # Dictionary to hold function translations
 FUNCTION_TRANSLATIONS: Dict[str, Callable] = {
     'merge': translate_merge,
     'date_range': translate_date_range,
+    'concat': translate_concat,
 } 
