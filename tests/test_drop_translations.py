@@ -1,6 +1,5 @@
 """Test drop operation translations."""
 import pytest
-from pd2pl import translate_code
 from tests.conftest import translate_test_code
 @pytest.mark.parametrize(
     "pandas_code,expected_polars",
