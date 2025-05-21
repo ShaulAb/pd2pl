@@ -342,8 +342,19 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         if translation.requires_selector:
             self.needs_selector_import = True
 
+        # Check for inplace parameter
+        inplace = False
+        args_dict = self._args_to_dict(node)
+        if 'inplace' in args_dict:
+            inplace_node = args_dict['inplace']
+            if isinstance(inplace_node, ast.Constant) and inplace_node.value is True:
+                inplace = True
+                # Remove inplace from args_dict to prevent it being passed to the polars method
+                del args_dict['inplace']
+                # Filter out inplace from keywords
+                node.keywords = [kw for kw in node.keywords if kw.arg != 'inplace']
+
         if translation.method_chain:
-            args_dict = self._args_to_dict(node)
             chain = translation.method_chain(node.args, args_dict)
             if chain:
                 current_node = ast.Name(id=f"{var_name}_pl", ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id=var_name, ctx=ast.Load())
@@ -358,6 +369,16 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                         keywords=[ast.keyword(arg=k, value=self._convert_arg_value(v)) 
                                 for k, v in kwargs.items() if v is not None]
                     )
+                
+                # If inplace=True, wrap in assignment
+                if inplace:
+                    target_name = self._get_target_name(node.func.value)
+                    target_node = ast.Name(id=target_name, ctx=ast.Store())
+                    ast.copy_location(target_node, node)  # Copy location to the target name
+                    result_node = ast.Assign(targets=[target_node], value=current_node)
+                    ast.copy_location(result_node, node)  # Copy location to the assignment
+                    return result_node
+                
                 return current_node
 
         new_node = ast.Call(
@@ -383,8 +404,38 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 else:
                     new_keywords.append(kw)
             new_node.keywords = new_keywords
+        
+        # If inplace=True, wrap in assignment
+        if inplace:
+            target_name = self._get_target_name(node.func.value)
+            target_node = ast.Name(id=target_name, ctx=ast.Store())
+            ast.copy_location(target_node, node)  # Copy location to the target name
+            result_node = ast.Assign(targets=[target_node], value=new_node)
+            ast.copy_location(result_node, node)  # Copy location to the assignment
+            return result_node
             
         return new_node
+        
+    def _get_target_name(self, node):
+        """Extract the target name for assignment from a node.
+        
+        For simple variables like 'df', returns 'df_pl' if rename_dataframe is True.
+        For attribute access like 'data.df', returns 'data.df_pl' if rename_dataframe is True.
+        """
+        if isinstance(node, ast.Name):
+            # Simple variable: df -> df_pl
+            return f"{node.id}_pl" if self.config.get('rename_dataframe', False) else node.id
+        elif isinstance(node, ast.Attribute):
+            # Attribute access: data.df -> data.df_pl
+            base = self._get_target_name(node.value)
+            if self.config.get('rename_dataframe', False):
+                return f"{base}.{node.attr}_pl"
+            else:
+                return f"{base}.{node.attr}"
+        else:
+            # Fallback for complex expressions
+            logger.warning(f"Complex expression in inplace operation: {ast.dump(node)}")
+            return "result_pl" if self.config.get('rename_dataframe', False) else "result"
         
     def _transform_string_method(self, node: ast.Call) -> ast.AST:
         method_name = node.func.attr
