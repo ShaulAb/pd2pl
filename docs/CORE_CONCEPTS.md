@@ -43,6 +43,10 @@ This class is the workhorse of the translation process.
     3.  Constructs new AST nodes representing the Polars operation.
     4.  Returns the new Polars AST node(s), which replace the original pandas node(s) in the tree.
     5.  If a node is not pandas-related, it's typically returned unchanged or its children are visited recursively.
+*   **Centralized inplace Handling**: The transformer implements a centralized mechanism for handling `inplace=True` parameters, which are common in pandas but don't have direct Polars equivalents:
+    1.  When a method with `inplace=True` is detected, the parameter is removed from the kwargs.
+    2.  The resulting Polars operation is wrapped in an assignment expression that reassigns the result back to the original variable.
+    3.  This approach ensures a consistent translation pattern for all methods that support inplace operations, without requiring special handling in each individual method mapping.
 
 ## 3. The Mapping System (`pd2pl/mapping/`)
 
