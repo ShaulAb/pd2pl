@@ -268,8 +268,6 @@ AGG_TO_SELECTOR = {
 }
 
 # Helper to build selector AST
-import ast
-
 def selector_ast(selector):
     if selector == 'numeric':
         return ast.Call(
@@ -551,6 +549,181 @@ def _transform_groupby_agg_chain(args: List[Any], kwargs: Dict[str, Any]) -> Lis
     method_steps.append(('agg', [ast.List(elts=agg_exprs, ctx=ast.Load())], {}))
     return method_steps
 
+def _transform_replace_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """Transform replace arguments to polars equivalents.
+    
+    In Polars, replace() is an expression method, not a DataFrame method, so we need to:
+    1. Use with_columns() at the DataFrame level
+    2. Apply pl.col("*").replace() for standard cases
+    3. Handle special cases like regex, None replacement, etc. separately
+    
+    This handles:
+    - Standard replacements: df.replace(1, 2) -> df_pl.with_columns(pl.col("*").replace(1, 2))
+    - Dict replacements: df.replace({1: 2}) -> df_pl.with_columns(pl.col("*").replace({1: 2}))
+    - List replacements: df.replace([1, 2], 3) -> df_pl.with_columns(pl.col("*").replace([1, 2], 3))
+    - Column-specific replacements: df.replace({'A': {1: 2}}) -> df_pl.with_columns(pl.col('A').replace({1: 2}))
+    - Regex replacements: df.replace('pattern', 'new', regex=True) -> df_pl.with_columns(pl.col("*").str.replace_all('pattern', 'new'))
+    - None replacements: df.replace(None, 0) -> df_pl.with_columns(pl.col("*").fill_null(0))
+    """
+    # Extract key parameters
+    to_replace = kwargs.get('to_replace', args[0] if args else None)
+    value = kwargs.get('value', args[1] if len(args) > 1 else None)
+    
+    # Check for regex flag
+    regex = False
+    if 'regex' in kwargs:
+        regex_arg = kwargs['regex']
+        if isinstance(regex_arg, ast.Constant) and regex_arg.value is True:
+            regex = True
+    
+    # Special Case 1: None replacement (special case for fill_null)
+    if (isinstance(to_replace, ast.Constant) and 
+        (to_replace.value is None or 
+         (isinstance(to_replace.value, str) and to_replace.value == 'pd.NA')) and
+        value is not None):
+        return [('with_columns', 
+                [ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr='col',
+                                ctx=ast.Load()
+                            ),
+                            args=[ast.Constant(value='*')],
+                            keywords=[]
+                        ),
+                        attr='fill_null',
+                        ctx=ast.Load()
+                    ),
+                    args=[value],
+                    keywords=[]
+                )], 
+                {})]
+    
+    # Special Case 2: Regex replacement
+    elif regex and value is not None:
+        return [('with_columns', 
+                [ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Attribute(
+                            value=ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id='pl', ctx=ast.Load()),
+                                    attr='col',
+                                    ctx=ast.Load()
+                                ),
+                                args=[ast.Constant(value='*')],
+                                keywords=[]
+                            ),
+                            attr='str',
+                            ctx=ast.Load()
+                        ),
+                        attr='replace_all',
+                        ctx=ast.Load()
+                    ),
+                    args=[to_replace, value],
+                    keywords=[]
+                )], 
+                {})]
+    
+    # Special Case 3: Column-specific dictionary replacement
+    elif (isinstance(to_replace, ast.Dict) and 
+          len(to_replace.keys) > 0 and 
+          isinstance(to_replace.values[0], ast.Dict)):
+        # This is a nested dict like {'A': {1: 2}} - column specific replacement
+        column_name = to_replace.keys[0]
+        replacement_dict = to_replace.values[0]
+        
+        return [('with_columns', 
+                [ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr='col',
+                                ctx=ast.Load()
+                            ),
+                            args=[column_name],
+                            keywords=[]
+                        ),
+                        attr='replace',
+                        ctx=ast.Load()
+                    ),
+                    args=[replacement_dict],
+                    keywords=[]
+                )], 
+                {})]
+    
+    # Special Case 4: List replacement - use replace directly for idiomatic polars
+    elif isinstance(to_replace, ast.List) and value is not None:
+        return [('with_columns', 
+                [ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr='col',
+                                ctx=ast.Load()
+                            ),
+                            args=[ast.Constant(value='*')],
+                            keywords=[]
+                        ),
+                        attr='replace',
+                        ctx=ast.Load()
+                    ),
+                    args=[to_replace, value],
+                    keywords=[]
+                )], 
+                {})]
+    
+    # Standard Case 5: Dictionary replacement without column specifics
+    elif isinstance(to_replace, ast.Dict) and value is None:
+        return [('with_columns', 
+                [ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr='col',
+                                ctx=ast.Load()
+                            ),
+                            args=[ast.Constant(value='*')],
+                            keywords=[]
+                        ),
+                        attr='replace',
+                        ctx=ast.Load()
+                    ),
+                    args=[to_replace],
+                    keywords=[]
+                )], 
+                {})]
+    
+    # Standard Case 6: Scalar replacement
+    elif to_replace is not None and value is not None:
+        return [('with_columns', 
+                [ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr='col',
+                                ctx=ast.Load()
+                            ),
+                            args=[ast.Constant(value='*')],
+                            keywords=[]
+                        ),
+                        attr='replace',
+                        ctx=ast.Load()
+                    ),
+                    args=[to_replace, value],
+                    keywords=[]
+                )], 
+                {})]
+    
+    # Default fallback
+    return None
+
 # Basic method translations
 DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
     'head': ChainableMethodTranslation(
@@ -748,6 +921,20 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
         category=MethodCategory.AGGREGATION,
         method_chain=_transform_groupby_agg_chain,
         doc='Aggregate using one or more operations over the specified axis.'
+    ),
+    'replace': ChainableMethodTranslation(
+        polars_method='with_columns',  # Use with_columns at the DataFrame level
+        category=MethodCategory.TRANSFORM,
+        argument_map={
+            'to_replace': None,  # Handle all parameters in the chain function
+            'value': None,       
+            'regex': None,        
+            'inplace': None,      # Drop inplace parameter
+            'limit': None,        # Drop deprecated parameter
+            'method': None,       # Drop deprecated parameter
+        },
+        method_chain=_transform_replace_chain,
+        doc='Replace values in the DataFrame. Correctly handles all replacement patterns through pl.col("*").replace().'
     ),
 }
 
