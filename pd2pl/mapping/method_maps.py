@@ -724,6 +724,90 @@ def _transform_replace_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tu
     # Default fallback
     return None
 
+def _transform_fillna_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+    """Transform fillna arguments to polars fill_null parameters.
+    
+    Handles:
+    - Simple scalar fills: df.fillna(0) -> df_pl.fill_null(0)
+    - Dictionary-based column-specific fills: df.fillna({'A': 0, 'B': 1}) -> df_pl.with_columns([...])
+    - Method-based fills: df.fillna(method='ffill') -> df_pl.fill_null(strategy='forward')
+    - Method with limit: df.fillna(method='ffill', limit=2) -> df_pl.fill_null(strategy='forward', limit=2)
+    
+    Raises TranslationError for:
+    - axis=1/'columns' (not supported)
+    - downcast parameter (not supported)
+    
+    Note on type safety: Pandas allows filling mixed data types with a single value,
+    while Polars enforces strict type safety. When translating fillna with a scalar value 
+    that would be applied to mixed data types, the generated code may fail at runtime in Polars.
+    For mixed data types, users should use dictionary-based fills with type-appropriate values.
+    """
+    # Extract key parameters
+    value = kwargs.get('value', args[0] if args else None)
+    method = kwargs.get('method', None)
+    limit = kwargs.get('limit', None)
+    
+    # Check for unsupported parameters
+    if 'axis' in kwargs:
+        axis = kwargs['axis']
+        if isinstance(axis, ast.Constant) and (axis.value == 1 or axis.value == 'columns'):
+            raise TranslationError("axis=1 or 'columns' is not supported in fillna translation")
+    
+    if 'downcast' in kwargs:
+        raise TranslationError("downcast parameter is not supported in fillna translation")
+    
+    # Handle method-based fills (ffill, bfill)
+    if method is not None:
+        strategy_kwargs = {}
+        
+        # Map method to strategy
+        if isinstance(method, ast.Constant):
+            if method.value in ('ffill', 'pad'):
+                strategy_kwargs['strategy'] = ast.Constant(value='forward')
+            elif method.value in ('bfill', 'backfill'):
+                strategy_kwargs['strategy'] = ast.Constant(value='backward')
+            else:
+                raise TranslationError(f"Unsupported method '{method.value}' in fillna translation")
+        
+        # Add limit if present
+        if limit is not None:
+            strategy_kwargs['limit'] = limit
+        
+        return [('fill_null', [], strategy_kwargs)]
+    
+    # Handle dictionary-based column-specific fills
+    elif isinstance(value, ast.Dict):
+        # Create a list of expressions for with_columns
+        exprs = []
+        for key, val in zip(value.keys, value.values):
+            if isinstance(key, ast.Constant):
+                # Create expression: pl.col('column_name').fill_null(value)
+                expr = ast.Call(
+                    func=ast.Attribute(
+                        value=ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Name(id='pl', ctx=ast.Load()),
+                                attr='col',
+                                ctx=ast.Load()
+                            ),
+                            args=[key],
+                            keywords=[]
+                        ),
+                        attr='fill_null',
+                        ctx=ast.Load()
+                    ),
+                    args=[val],
+                    keywords=[]
+                )
+                exprs.append(expr)
+        
+        # Return with_columns([expressions])
+        return [('with_columns', [ast.List(elts=exprs, ctx=ast.Load())], {})]
+    
+    # Handle simple scalar value fill
+    else:
+        return [('fill_null', [value], {})]
+
 # Basic method translations
 DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
     'head': ChainableMethodTranslation(
@@ -752,7 +836,7 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
         argument_map={
             'axis': None,        # Drop axis parameter
             'index': None,       # Drop index parameter
-            'inplace': None,     # Drop inplace parameter
+            'inplace': None,     # Handled centrally
             'columns': None,     # Will be handled in method_chain
         },
         method_chain=_transform_drop_chain,
@@ -761,7 +845,16 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
     'fillna': ChainableMethodTranslation(
         polars_method='fill_null',
         category=MethodCategory.TRANSFORM,
-        doc='Fill null values with a constant value'
+        argument_map={
+            'value': None,       # Handled by chain
+            'method': None,      # Handled by chain
+            'axis': None,        # Handled by chain
+            'inplace': None,     # Handled centrally
+            'limit': None,       # Handled by chain
+            'downcast': None,    # Error is raised for this
+        },
+        method_chain=_transform_fillna_chain,
+        doc='Fill null values with a value or using a method'
     ),
     'mean': ChainableMethodTranslation(
         polars_method='mean',
@@ -832,7 +925,7 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
             'ascending': 'descending',     # Will be transformed in method_chain
             'na_position': 'nulls_last',   # Will be transformed in method_chain
             'axis': None,                  # Drop axis parameter
-            'inplace': None,               # Drop inplace parameter
+            'inplace': None,               # Handled centrally
             'kind': None,                  # Drop kind parameter
             'ignore_index': None,          # Drop ignore_index parameter
         },
@@ -850,7 +943,7 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
         argument_map={
             'subset': None,        # Handled by chain
             'keep': None,         # Handled by chain
-            'inplace': None,      # Drop inplace parameter
+            'inplace': None,      # Handled centrally
             'ignore_index': None, # Drop ignore_index parameter
         },
         method_chain=_transform_drop_duplicates_chain,
@@ -929,7 +1022,7 @@ DATAFRAME_METHOD_TRANSLATIONS: Dict[str, ChainableMethodTranslation] = {
             'to_replace': None,  # Handle all parameters in the chain function
             'value': None,       
             'regex': None,        
-            'inplace': None,      # Drop inplace parameter
+            'inplace': None,      # Handled centrally
             'limit': None,        # Drop deprecated parameter
             'method': None,       # Drop deprecated parameter
         },
