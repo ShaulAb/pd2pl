@@ -446,6 +446,31 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             keywords=[]
         )
         
+        # Add rename() call to maintain pandas-compatible column names
+        # This ensures columns don't have the _mean, _sum, etc. suffixes in the final code
+        schema = agg_node.schema_after
+        if schema:
+            rename_map = schema.get_pandas_compat_rename_map()
+            if rename_map:
+                logger.debug(f"Adding rename() to maintain pandas-compatible column names: {rename_map}")
+                
+                # Create dict AST node for the rename map
+                rename_dict = ast.Dict(
+                    keys=[ast.Constant(value=k) for k in rename_map.keys()],
+                    values=[ast.Constant(value=v) for v in rename_map.values()]
+                )
+                
+                # Add the rename() call
+                current_node = ast.Call(
+                    func=ast.Attribute(
+                        value=current_node,
+                        attr='rename',
+                        ctx=ast.Load()
+                    ),
+                    args=[rename_dict],
+                    keywords=[]
+                )
+        
         # Add sort if present
         if sort_node:
             # Get schema after aggregation
@@ -456,33 +481,23 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             sort_args = []
             sort_kwargs = {}
             
-            # Handle 'by' parameter with proper column renaming
+            # Handle 'by' parameter - use original column names for sorting
+            # Since we've already renamed columns back to their original names,
+            # we should use those original names in the sort call
             if 'by' in args_dict:
                 by_arg = args_dict['by']
                 if isinstance(by_arg, ast.Constant) and isinstance(by_arg.value, str):
                     col_name = by_arg.value
-                    # Get the renamed column from schema
-                    if schema and col_name in schema.aggregated_columns:
-                        renamed_col = schema.aggregated_columns[col_name]
-                        logger.debug(f"Sort: Renaming column {col_name} to {renamed_col}")
-                        sort_args.append(ast.Constant(value=renamed_col))
-                    else:
-                        # Keep original name if no renaming found
-                        sort_args.append(ast.Constant(value=col_name))
+                    # Use the original column name directly since we've already renamed
+                    logger.debug(f"Sort: Using original column name {col_name} for sort")
+                    sort_args.append(ast.Constant(value=col_name))
                 elif isinstance(by_arg, ast.List):
-                    # List of columns
+                    # List of columns - use original names
                     col_names = [elt.value for elt in by_arg.elts if isinstance(elt, ast.Constant)]
-                    renamed_cols = []
-                    for col in col_names:
-                        if schema and col in schema.aggregated_columns:
-                            renamed = schema.aggregated_columns[col]
-                            logger.debug(f"Sort: Renaming column {col} to {renamed}")
-                            renamed_cols.append(renamed)
-                        else:
-                            renamed_cols.append(col)
+                    logger.debug(f"Sort: Using original column names {col_names} for sort")
                     sort_args.append(
                         ast.List(
-                            elts=[ast.Constant(value=col) for col in renamed_cols],
+                            elts=[ast.Constant(value=col) for col in col_names],
                             ctx=ast.Load()
                         )
                     )
@@ -650,6 +665,30 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 args=agg_exprs if len(agg_exprs) > 1 else [agg_exprs[0]],
                 keywords=[]
             )
+            
+            # Add rename() call to restore pandas-compatible column names
+            # This makes the polars result match pandas behavior where column names don't change after aggregation
+            if schema and agg_node:
+                rename_map = schema.get_pandas_compat_rename_map()
+                if rename_map:
+                    logger.debug(f"Adding rename() call to restore pandas-compatible column names: {rename_map}")
+                    
+                    # Create a dictionary node for the rename map
+                    rename_dict = ast.Dict(
+                        keys=[ast.Constant(value=k) for k in rename_map.keys()],
+                        values=[ast.Constant(value=v) for v in rename_map.values()]
+                    )
+                    
+                    # Add the rename() call
+                    current_node = ast.Call(
+                        func=ast.Attribute(
+                            value=current_node,
+                            attr='rename',
+                            ctx=ast.Load()
+                        ),
+                        args=[rename_dict],
+                        keywords=[]
+                    )
         
         # Add sort if present
         if sort_node:
