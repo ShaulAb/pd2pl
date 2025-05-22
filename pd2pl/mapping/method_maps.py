@@ -3,11 +3,12 @@ from typing import Dict, Any, Optional, List, Tuple
 import ast
 from pd2pl.logging import logger
 from pd2pl.errors import TranslationError
+from pd2pl.schema_tracking import SchemaState
 
 from .method_categories import MethodCategory, ChainableMethodTranslation
 from .string_maps import STRING_METHODS_INFO
 
-def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any], schema=None) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any], schema: Optional[SchemaState] = None) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
     """Transform sort_values arguments to polars sort parameters.
     
     Handles:
@@ -18,30 +19,39 @@ def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any], schema=None) 
     
     Moves column specifications to args for more idiomatic Polars code.
     """
+    logger.debug(f"TRANSFORM MAP: sort_values -> sort (START)")
+    logger.debug(f"TRANSFORM MAP: Input args={args}, kwargs={kwargs}")
+    if schema:
+        logger.debug(f"TRANSFORM MAP: With schema, in_groupby_chain={schema.in_groupby_chain if hasattr(schema, 'in_groupby_chain') else False}")
+    
     sort_args = []
     sort_kwargs = {}
     
     # Handle column specification
     if 'by' in kwargs:
         columns = kwargs['by']
+        logger.debug(f"TRANSFORM MAP: Using 'by' keyword argument: {ast.dump(columns)[:100]}")
     elif args:
         columns = args[0]
+        logger.debug(f"TRANSFORM MAP: Using first positional argument: {ast.dump(columns)[:100]}")
     else:
         columns = []
+        logger.debug("TRANSFORM MAP: No column specification found")
     
-    logger.debug(f"_transform_sort_chain: initial columns={columns}")
+    logger.debug(f"PARAM TRANSFORM: 'by' -> first positional argument for sort")
+    logger.debug(f"TRANSFORM MAP: Initial columns={ast.dump(columns)[:100]}")
     
     # If schema is provided and we're in a groupby chain, resolve column references
     if schema and schema.in_groupby_chain:
-        logger.debug(f"_transform_sort_chain: resolving columns with schema, in_groupby_chain={schema.in_groupby_chain}")
-        logger.debug(f"_transform_sort_chain: schema columns={schema.columns}")
-        logger.debug(f"_transform_sort_chain: schema aggregated_columns={schema.aggregated_columns}")
+        logger.debug(f"TRANSFORM MAP: Resolving columns with schema in groupby chain")
+        logger.debug(f"SCHEMA INFO: Available columns = {schema.columns}")
+        logger.debug(f"SCHEMA INFO: Aggregated columns mapping = {schema.aggregated_columns}")
         
         if isinstance(columns, ast.Constant) and isinstance(columns.value, str):
             # Single column name
             orig_col = columns.value
             resolved_col = schema.resolve_column_reference(orig_col)
-            logger.debug(f"_transform_sort_chain: resolved single column {orig_col} -> {resolved_col}")
+            logger.debug(f"COLUMN RESOLUTION: Single column '{orig_col}' -> '{resolved_col}'")
             columns = ast.Constant(value=resolved_col)
         elif isinstance(columns, ast.List):
             # List of column names
@@ -50,47 +60,61 @@ def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any], schema=None) 
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
                     orig_col = elt.value
                     resolved_col = schema.resolve_column_reference(orig_col)
-                    logger.debug(f"_transform_sort_chain: resolved list column {orig_col} -> {resolved_col}")
+                    logger.debug(f"COLUMN RESOLUTION: List item '{orig_col}' -> '{resolved_col}'")
                     new_elts.append(ast.Constant(value=resolved_col))
                 else:
+                    logger.debug(f"COLUMN RESOLUTION: Non-string column item, keeping as is")
                     new_elts.append(elt)
             columns = ast.List(elts=new_elts, ctx=ast.Load())
         
-    logger.debug(f"_transform_sort_chain: resolved columns={columns}")
+    logger.debug(f"TRANSFORM MAP: Final resolved columns: {ast.dump(columns)[:100]}")
         
     # Normalize columns to handle single column and list cases
     if isinstance(columns, ast.List):
         # AST List node
         if len(columns.elts) == 1:
+            logger.debug("PARAM TRANSFORM: Normalizing single-item list to single value")
             sort_args = [columns.elts[0]]  # Single element list -> single value
         elif len(columns.elts) == 0:
+            logger.debug("PARAM TRANSFORM: Using empty list as is")
             sort_args = [ast.List(elts=[], ctx=ast.Load())]  # Empty list -> keep as empty list
         else:
+            logger.debug(f"PARAM TRANSFORM: Using column list with {len(columns.elts)} items")
             sort_args = [columns]  # Multiple elements -> keep as list
     elif isinstance(columns, ast.Constant):
         # Single string constant
+        logger.debug(f"PARAM TRANSFORM: Using single column name: '{columns.value}'")
         sort_args = [columns]
     else:
         # Other AST node types (expressions, etc.)
+        logger.debug(f"PARAM TRANSFORM: Using non-constant column expression")
         sort_args = [columns]
     
     # Handle ascending/descending
     if 'ascending' in kwargs:
         ascending = kwargs['ascending']
+        logger.debug(f"PARAM TRANSFORM: Processing 'ascending' parameter: {ast.dump(ascending)[:100]}")
+        logger.debug(f"PARAM TRANSFORM: 'ascending' -> 'descending' with inverted boolean value(s)")
+        
         if isinstance(ascending, ast.List):
             # For multiple columns, invert each boolean in the list
+            logger.debug(f"PARAM TRANSFORM: 'ascending' is a list with {len(ascending.elts)} elements")
             new_elts = []
-            for elt in ascending.elts:
+            for i, elt in enumerate(ascending.elts):
                 if isinstance(elt, ast.Constant) and isinstance(elt.value, bool):
                     # Create boolean constant with inverted value
-                    new_elts.append(ast.Constant(value=not elt.value))
+                    new_value = not elt.value
+                    logger.debug(f"PARAM TRANSFORM: Inverting boolean at position {i}: {elt.value} -> {new_value}")
+                    new_elts.append(ast.Constant(value=new_value))
                 else:
                     # For non-constants, use a UnaryOp with Not operator
+                    logger.debug(f"PARAM TRANSFORM: Using Not operator for non-constant at position {i}")
                     new_elts.append(ast.UnaryOp(
                         op=ast.Not(),
                         operand=elt
                     ))
             
+            logger.debug(f"PARAM TRANSFORM: Created 'descending' list with {len(new_elts)} inverted values")
             sort_kwargs['descending'] = ast.List(
                 elts=new_elts,
                 ctx=ast.Load()
@@ -98,15 +122,19 @@ def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any], schema=None) 
         elif isinstance(ascending, ast.Constant):
             if isinstance(ascending.value, bool):
                 # For single boolean constant, just invert the value
-                sort_kwargs['descending'] = ast.Constant(value=not ascending.value)
+                new_value = not ascending.value
+                logger.debug(f"PARAM TRANSFORM: Inverting single boolean: {ascending.value} -> {new_value}")
+                sort_kwargs['descending'] = ast.Constant(value=new_value)
             else:
                 # For non-boolean constants, generate a runtime inversion
+                logger.debug(f"PARAM TRANSFORM: Using Not operator for non-boolean constant")
                 sort_kwargs['descending'] = ast.UnaryOp(
                     op=ast.Not(),
                     operand=ascending
                 )
         else:
             # For other expressions, use the Not operator
+            logger.debug(f"PARAM TRANSFORM: Using Not operator for complex expression")
             sort_kwargs['descending'] = ast.UnaryOp(
                 op=ast.Not(),
                 operand=ascending
