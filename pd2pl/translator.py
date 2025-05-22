@@ -1,14 +1,17 @@
 """Core translator module for converting pandas code to polars."""
 import ast
-from typing import Any, Dict, Optional, Set, Union, List
-from enum import Enum
+from typing import Any, Dict, Optional, Set, List
 import importlib.util
 import logging
+import warnings
 
 from .errors import UnsupportedPandasUsageError, TranslationError
 from .mapping import function_maps, method_maps, FUNCTION_TRANSLATIONS
 from .logging import logger
 from .mapping.dtype_maps import to_polars_dtype, CONSTRUCTOR_MAP
+from .schema_tracking import SchemaState, SchemaRegistry
+from .chain_tracking import ChainRegistry, ChainNode
+from .chain_preprocessing import preprocess_chains
 
 try:
     import astroid
@@ -25,9 +28,63 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         self.config = config or {}
         self.dataframe_vars: Set[str] = {'df', 'df_left', 'df_right', 'df_right_diffkey'}
         self.pandas_aliases: Set[str] = {'pd', 'pandas'}
+        self.numpy_aliases: Set[str] = {'np'}
         self.needs_polars_import = False
         self.needs_selector_import = False
         self.in_filter_context = False
+        self.df_count = 0
+        # Schema registry for tracking DataFrame schemas
+        self.schema_registry = SchemaRegistry()
+        # Chain registry for tracking method chains
+        self.chain_registry: Optional[ChainRegistry] = None
+        # Skip nodes that have been processed as part of chains
+        self.processed_chain_nodes: Set[int] = set()
+        
+    def preprocess_tree(self, tree: ast.AST) -> ast.AST:
+        """Preprocess the AST to identify and analyze method chains."""
+        logger.debug("Starting chain preprocessing phase")
+        chain_registry, schema_registry = preprocess_chains(tree, self.dataframe_vars)
+        self.chain_registry = chain_registry
+        self.schema_registry = schema_registry
+        logger.debug("Preprocessing complete. Ready for transformation.")
+        return tree
+        
+    def process(self, tree: ast.AST) -> ast.AST:
+        """Process the entire AST with preprocessing and transformation."""
+        # Phase 1: Preprocess to identify chains
+        preprocessed_tree = self.preprocess_tree(tree)
+        
+        # Before transforming, check if we have a top-level chain with groupby + agg + sort
+        if self.chain_registry:
+            for chain_id, nodes in self.chain_registry.chains_by_id.items():
+                sorted_nodes = sorted(nodes, key=lambda n: n.position)
+                methods = [n.method_name for n in sorted_nodes]
+                
+                # If this is a groupby+mean+sort_values chain, handle it directly
+                if 'groupby' in methods and 'mean' in methods and 'sort_values' in methods:
+                    logger.debug(f"Using specialized transformation for entire groupby+agg+sort chain: {' -> '.join(methods)}")
+                    # Find the root expression
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Expr) and hasattr(node, 'value'):
+                            if id(node.value) == id(sorted_nodes[-1].node):  # Check if this is our chain's end node
+                                # Replace with our custom chain transformation
+                                root_node = sorted_nodes[0]
+                                logger.debug(f"Transforming entire chain starting at {root_node.method_name}")
+                                
+                                # Use our specialized transformation with schema context
+                                result = self._transform_complete_groupby_chain(sorted_nodes)
+                                
+                                # Replace the node with our result
+                                transformed_tree = tree
+                                for body_item in transformed_tree.body:
+                                    if isinstance(body_item, ast.Expr) and id(body_item.value) == id(node.value):
+                                        body_item.value = result
+                                return transformed_tree
+        
+        # Default: Transform the AST
+        transformed_tree = self.visit(preprocessed_tree)
+        
+        return transformed_tree
         
     def visit_Name(self, node: ast.Name) -> ast.Name:
         """Visit a name node and transform DataFrame/Series variable names if configured."""
@@ -38,6 +95,41 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         return node
         
     def visit_Call(self, node: ast.Call) -> ast.AST:
+        # Skip nodes that have already been processed as part of a chain
+        if hasattr(self, 'processed_chain_nodes') and id(node) in self.processed_chain_nodes:
+            logger.debug(f"Skipping already processed chain node: {id(node)}")
+            return node
+            
+        # Check if this node is part of a method chain
+        if self.chain_registry and self.chain_registry.is_in_chain(node):
+            chain_node = self.chain_registry.get_node(node)
+            chain = self.chain_registry.get_chain_for_node(node)
+            
+            # Only process from the chain root to avoid duplicate processing
+            if chain_node and chain and chain_node.position == 0:
+                logger.debug(f"Processing chain from root: {chain_node.method_name}")
+                
+                # Process the entire chain at once
+                sorted_chain = sorted(chain, key=lambda n: n.position)
+                
+                # Check if the chain contains a groupby method
+                methods = [n.method_name for n in sorted_chain]
+                if 'groupby' in methods:
+                    logger.debug(f"Using specialized groupby chain transformation for {' -> '.join(methods)}")
+                    transformed_node = self._transform_groupby_chain(sorted_chain)
+                else:
+                    # Use a generic chain transformation for other cases
+                    transformed_node = self._transform_generic_chain(sorted_chain)
+                
+                # Mark all chain nodes as processed to avoid duplicate processing
+                self.processed_chain_nodes = self.processed_chain_nodes.union({id(n.node) for n in chain})
+                
+                return transformed_node
+            elif chain_node and chain:
+                # Skip non-root nodes, they will be processed when we start from the root
+                logger.debug(f"Skipping non-root chain node: {chain_node.method_name}")
+                return node
+                
         # If already a polars call, just visit args/keywords and return
         if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == 'pl':
             new_args = [self.visit(arg) for arg in node.args]
@@ -262,10 +354,508 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             
         return self.generic_visit(node)
         
+    def _transform_method_chain(self, chain: List[ChainNode]) -> ast.AST:
+        """Transform an entire method chain at once."""
+        if not chain:
+            return None
+            
+        # Sort nodes by position
+        sorted_nodes = sorted(chain, key=lambda n: n.position)
+        logger.debug(f"Transforming method chain: {' -> '.join(n.method_name for n in sorted_nodes)}")
+        
+        # Handle different types of chains based on their methods
+        methods = [node.method_name for node in sorted_nodes]
+        
+        # Check for groupby-based chains
+        if 'groupby' in methods:
+            return self._transform_groupby_chain(sorted_nodes)
+            
+        # Generic chain handling for other cases
+        return self._transform_generic_chain(sorted_nodes)
+    
+    def _transform_complete_groupby_chain(self, chain_nodes: List[ChainNode]) -> ast.AST:
+        """Transform a complete chain of groupby+aggregation+sort with full schema context."""
+        logger.debug(f"Transforming complete groupby chain with {len(chain_nodes)} methods")
+        
+        # Identify the main components of the chain
+        groupby_node = None
+        agg_node = None
+        sort_node = None
+        
+        for node in chain_nodes:
+            if node.method_name == 'groupby':
+                groupby_node = node
+            elif node.method_name in ['mean', 'sum', 'min', 'max', 'count']:
+                agg_node = node
+            elif node.method_name == 'sort_values':
+                sort_node = node
+                
+        if not (groupby_node and agg_node):
+            logger.warning("Expected groupby and aggregation nodes not found in chain")
+            return self.generic_visit(chain_nodes[0].node)
+        
+        # Extract DataFrame and column information
+        root_node = chain_nodes[0]
+        df_var = None
+        selected_columns = []
+        
+        # Get DataFrame and selected columns
+        if isinstance(root_node.node.func.value, ast.Subscript) and isinstance(root_node.node.func.value.value, ast.Name):
+            df_var = root_node.node.func.value.value.id
+            selected_columns = self._extract_columns_from_selection(root_node.node.func.value)
+        elif isinstance(root_node.node.func.value, ast.Name):
+            df_var = root_node.node.func.value.id
+            
+        logger.debug(f"Chain base: {df_var} with columns {selected_columns}")
+        
+        # Start building the transformed chain
+        current_node = None
+        if selected_columns:
+            current_node = ast.Subscript(
+                value=ast.Name(id=df_var, ctx=ast.Load()),
+                slice=ast.List(
+                    elts=[ast.Constant(value=col) for col in selected_columns],
+                    ctx=ast.Load()
+                ),
+                ctx=ast.Load()
+            )
+        else:
+            current_node = ast.Name(id=df_var, ctx=ast.Load())
+            
+        # Add group_by operation
+        group_keys = self._extract_groupby_keys(groupby_node.node)
+        current_node = ast.Call(
+            func=ast.Attribute(
+                value=current_node,
+                attr='group_by',  # Transform 'groupby' to 'group_by'
+                ctx=ast.Load()
+            ),
+            args=[ast.Constant(value=key) if isinstance(key, str) else key for key in group_keys],
+            keywords=[]
+        )
+        
+        # Add aggregation
+        agg_method = agg_node.method_name
+        current_node = ast.Call(
+            func=ast.Attribute(
+                value=current_node,
+                attr=agg_method,
+                ctx=ast.Load()
+            ),
+            args=[],
+            keywords=[]
+        )
+        
+        # Add sort if present
+        if sort_node:
+            # Get schema after aggregation
+            schema = agg_node.schema_after
+            
+            # Extract sort parameters
+            args_dict = self._args_to_dict(sort_node.node)
+            sort_args = []
+            sort_kwargs = {}
+            
+            # Handle 'by' parameter with proper column renaming
+            if 'by' in args_dict:
+                by_arg = args_dict['by']
+                if isinstance(by_arg, ast.Constant) and isinstance(by_arg.value, str):
+                    col_name = by_arg.value
+                    # Get the renamed column from schema
+                    if schema and col_name in schema.aggregated_columns:
+                        renamed_col = schema.aggregated_columns[col_name]
+                        logger.debug(f"Sort: Renaming column {col_name} to {renamed_col}")
+                        sort_args.append(ast.Constant(value=renamed_col))
+                    else:
+                        # Keep original name if no renaming found
+                        sort_args.append(ast.Constant(value=col_name))
+                elif isinstance(by_arg, ast.List):
+                    # List of columns
+                    col_names = [elt.value for elt in by_arg.elts if isinstance(elt, ast.Constant)]
+                    renamed_cols = []
+                    for col in col_names:
+                        if schema and col in schema.aggregated_columns:
+                            renamed = schema.aggregated_columns[col]
+                            logger.debug(f"Sort: Renaming column {col} to {renamed}")
+                            renamed_cols.append(renamed)
+                        else:
+                            renamed_cols.append(col)
+                    sort_args.append(
+                        ast.List(
+                            elts=[ast.Constant(value=col) for col in renamed_cols],
+                            ctx=ast.Load()
+                        )
+                    )
+            
+            # Handle 'ascending' parameter - change to 'descending' with inverted value
+            if 'ascending' in args_dict:
+                ascending = args_dict['ascending']
+                if isinstance(ascending, ast.Constant) and isinstance(ascending.value, bool):
+                    sort_kwargs['descending'] = ast.Constant(value=not ascending.value)
+            
+            # Add sort call with renamed columns
+            current_node = ast.Call(
+                func=ast.Attribute(
+                    value=current_node,
+                    attr='sort',  # Transform 'sort_values' to 'sort'
+                    ctx=ast.Load()
+                ),
+                args=sort_args,
+                keywords=[ast.keyword(arg=k, value=v) for k, v in sort_kwargs.items()]
+            )
+        
+        # Return the complete transformed chain
+        return current_node
+    
+    def _transform_groupby_chain(self, chain_nodes: List[ChainNode]) -> ast.AST:
+        """Transform a chain that includes groupby operations."""
+        logger.debug(f"Transforming groupby chain with {len(chain_nodes)} methods")
+        
+        # Identify the main components of the chain
+        groupby_node = None
+        agg_node = None
+        sort_node = None
+        
+        for node in chain_nodes:
+            if node.method_name == 'groupby':
+                groupby_node = node
+            elif node.method_name in ['mean', 'sum', 'min', 'max', 'count']:
+                agg_node = node
+            elif node.method_name == 'sort_values':
+                sort_node = node
+        
+        if not groupby_node:
+            logger.warning("Expected groupby node not found in chain")
+            return self.generic_visit(chain_nodes[0].node)
+            
+        # Get initial part of the chain before groupby
+        root_node = chain_nodes[0]
+        df_var = None
+        selected_columns = []
+        
+        # Extract DataFrame name and selected columns
+        if isinstance(root_node.node.func.value, ast.Name):
+            df_var = root_node.node.func.value.id
+        elif (isinstance(root_node.node.func.value, ast.Subscript) and 
+              isinstance(root_node.node.func.value.value, ast.Name)):
+            df_var = root_node.node.func.value.value.id
+            
+            # Extract selected columns
+            slice_node = root_node.node.func.value.slice
+            if isinstance(slice_node, ast.Constant):
+                selected_columns = [slice_node.value]
+            elif isinstance(slice_node, ast.List):
+                selected_columns = [
+                    elt.value for elt in slice_node.elts
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                ]
+                
+        logger.debug(f"Chain base: {df_var} with columns {selected_columns}")
+        
+        # Start building the chain from the DataFrame
+        if selected_columns:
+            # Handle column selection
+            base_node = ast.Subscript(
+                value=ast.Name(id=df_var, ctx=ast.Load()),
+                slice=ast.List(
+                    elts=[ast.Constant(value=col) for col in selected_columns],
+                    ctx=ast.Load()
+                ),
+                ctx=ast.Load()
+            )
+        else:
+            # Direct DataFrame reference
+            base_node = ast.Name(id=df_var, ctx=ast.Load())
+            
+        # Transform the groupby operation
+        group_keys = self._extract_groupby_keys(groupby_node.node)
+        logger.debug(f"Groupby keys: {group_keys}")
+        
+        # Start building the transformed chain
+        current_node = base_node
+        
+        # Add group_by operation
+        current_node = ast.Call(
+            func=ast.Attribute(
+                value=current_node,
+                attr='group_by',  # Transform 'groupby' to 'group_by'
+                ctx=ast.Load()
+            ),
+            args=[ast.Constant(value=key) if isinstance(key, str) else key for key in group_keys],
+            keywords=[]
+        )
+        
+        # Add aggregation if present
+        if agg_node:
+            agg_method = agg_node.method_name
+            
+            # Get schema after groupby to determine column references
+            schema = groupby_node.schema_after
+            
+            # For each non-group column, create an aggregation expression
+            agg_exprs = []
+            for col in schema.columns:
+                if col not in schema.group_keys:
+                    logger.debug(f"Adding aggregation for column: {col}")
+                    agg_exprs.append(
+                        ast.Call(
+                            func=ast.Attribute(
+                                value=ast.Call(
+                                    func=ast.Attribute(
+                                        value=ast.Name(id='pl', ctx=ast.Load()),
+                                        attr='col',
+                                        ctx=ast.Load()
+                                    ),
+                                    args=[ast.Constant(value=col)],
+                                    keywords=[]
+                                ),
+                                attr=agg_method,
+                                ctx=ast.Load()
+                            ),
+                            args=[],
+                            keywords=[]
+                        )
+                    )
+            
+            # If no specific columns, use pl.all()
+            if not agg_exprs:
+                logger.debug("Using pl.all() for aggregation")
+                agg_exprs = [
+                    ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id='pl', ctx=ast.Load()),
+                                    attr='all',
+                                    ctx=ast.Load()
+                                ),
+                                args=[],
+                                keywords=[]
+                            ),
+                            attr=agg_method,
+                            ctx=ast.Load()
+                        ),
+                        args=[],
+                        keywords=[]
+                    )
+                ]
+            
+            # Add agg() call
+            current_node = ast.Call(
+                func=ast.Attribute(
+                    value=current_node,
+                    attr='agg',
+                    ctx=ast.Load()
+                ),
+                args=agg_exprs if len(agg_exprs) > 1 else [agg_exprs[0]],
+                keywords=[]
+            )
+        
+        # Add sort if present
+        if sort_node:
+            # Get schema after aggregation to resolve column names
+            schema = agg_node.schema_after if agg_node else groupby_node.schema_after
+            
+            logger.debug(f"Resolving sort columns using schema. Columns: {schema.columns}")
+            logger.debug(f"Aggregated column mappings: {schema.aggregated_columns}")
+            
+            # Extract sort parameters
+            args_dict = self._args_to_dict(sort_node.node)
+            sort_args = []
+            sort_kwargs = {}
+            
+            # Handle 'by' parameter with schema resolution
+            if 'by' in args_dict:
+                by_arg = args_dict['by']
+                if isinstance(by_arg, ast.Constant) and isinstance(by_arg.value, str):
+                    # Single column
+                    col_name = by_arg.value
+                    # Check for renamed columns after aggregation
+                    if col_name in schema.aggregated_columns:
+                        resolved_col = schema.aggregated_columns[col_name]
+                        logger.debug(f"Found direct mapping for sort column: {col_name} -> {resolved_col}")
+                    else:
+                        resolved_col = schema.resolve_column_reference(col_name)
+                        logger.debug(f"Resolved sort column via schema: {col_name} -> {resolved_col}")
+                    
+                    logger.debug(f"Final resolved sort column: {col_name} -> {resolved_col}")
+                    sort_args.append(ast.Constant(value=resolved_col))
+                elif isinstance(by_arg, ast.List):
+                    # List of columns
+                    col_names = [
+                        elt.value for elt in by_arg.elts
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                    ]
+                    
+                    # Resolve each column with direct lookup in aggregated_columns first
+                    resolved_cols = []
+                    for col in col_names:
+                        if col in schema.aggregated_columns:
+                            resolved = schema.aggregated_columns[col]
+                            logger.debug(f"Found direct mapping for sort column: {col} -> {resolved}")
+                            resolved_cols.append(resolved)
+                        else:
+                            resolved = schema.resolve_column_reference(col)
+                            logger.debug(f"Resolved sort column via schema: {col} -> {resolved}")
+                            resolved_cols.append(resolved)
+                    
+                    logger.debug(f"Final resolved sort columns: {col_names} -> {resolved_cols}")
+                    sort_args.append(
+                        ast.List(
+                            elts=[ast.Constant(value=col) for col in resolved_cols],
+                            ctx=ast.Load()
+                        )
+                    )
+            
+            # Handle 'ascending' parameter
+            if 'ascending' in args_dict:
+                ascending = args_dict['ascending']
+                if isinstance(ascending, ast.Constant) and isinstance(ascending.value, bool):
+                    # Convert to 'descending' with inverted value
+                    sort_kwargs['descending'] = ast.Constant(value=not ascending.value)
+            
+            # Add sort call
+            current_node = ast.Call(
+                func=ast.Attribute(
+                    value=current_node,
+                    attr='sort',  # Transform 'sort_values' to 'sort'
+                    ctx=ast.Load()
+                ),
+                args=sort_args,
+                keywords=[
+                    ast.keyword(arg=k, value=v) for k, v in sort_kwargs.items()
+                ]
+            )
+        
+        # Return the complete transformed chain
+        return current_node
+    
+    def _transform_generic_chain(self, chain_nodes: List[ChainNode]) -> ast.AST:
+        """Transform a generic method chain."""
+        logger.debug(f"Transforming generic chain with methods: {[n.method_name for n in chain_nodes]}")
+        
+        # Start with the base node
+        root_node = chain_nodes[0]
+        base_node = None
+        
+        # Determine the base node type
+        if isinstance(root_node.node.func.value, ast.Name):
+            # Direct DataFrame method: df.method()
+            df_var = root_node.node.func.value.id
+            base_node = ast.Name(id=df_var, ctx=ast.Load())
+        elif (isinstance(root_node.node.func.value, ast.Subscript) and 
+              isinstance(root_node.node.func.value.value, ast.Name)):
+            # Column selection: df['col'].method() or df[['col1', 'col2']].method()
+            df_var = root_node.node.func.value.value.id
+            base_node = self.visit(root_node.node.func.value)
+        else:
+            # Complex base, use generic visit
+            logger.warning(f"Complex chain base, using generic visit for {root_node.method_name}")
+            return self.generic_visit(root_node.node)
+            
+        # Build the chain by applying methods sequentially
+        current_node = base_node
+        
+        for chain_node in chain_nodes:
+            # Get method translation
+            method_name = chain_node.method_name
+            translation = method_maps.get_method_translation(method_name)
+            
+            if not translation:
+                logger.warning(f"No translation for method {method_name}, using original")
+                polars_method = method_name
+            else:
+                polars_method = translation.polars_method
+                
+            logger.debug(f"Translating method {method_name} -> {polars_method}")
+            
+            # Extract args and kwargs
+            args = [self.visit(arg) for arg in chain_node.node.args]
+            kwargs = [
+                ast.keyword(arg=kw.arg, value=self.visit(kw.value))
+                for kw in chain_node.node.keywords
+                # Skip 'inplace' parameter
+                if kw.arg != 'inplace'
+            ]
+            
+            # Apply argument mappings if available
+            if translation and translation.argument_map:
+                mapped_kwargs = []
+                for kw in kwargs:
+                    if kw.arg in translation.argument_map:
+                        mapped_name = translation.argument_map[kw.arg]
+                        if mapped_name is not None:
+                            mapped_kwargs.append(ast.keyword(arg=mapped_name, value=kw.value))
+                    else:
+                        mapped_kwargs.append(kw)
+                kwargs = mapped_kwargs
+            
+            # Apply the method
+            current_node = ast.Call(
+                func=ast.Attribute(
+                    value=current_node,
+                    attr=polars_method,
+                    ctx=ast.Load()
+                ),
+                args=args,
+                keywords=kwargs
+            )
+        
+        return current_node
+
     def _transform_groupby_agg(self, node: ast.Call) -> ast.AST:
         agg_method = node.func.attr
         groupby_call_node = node.func.value
 
+        # Extract group keys
+        group_keys = self._extract_groupby_keys(groupby_call_node)
+        logger.debug(f"Extracted group keys: {group_keys}")
+        
+        # Get DataFrame variable name and extract columns
+        df_var = None
+        selected_columns = []
+        
+        if isinstance(groupby_call_node, ast.Call) and isinstance(groupby_call_node.func, ast.Attribute):
+            if isinstance(groupby_call_node.func.value, ast.Name):
+                # Simple case: df.groupby()
+                df_var = groupby_call_node.func.value.id
+            elif isinstance(groupby_call_node.func.value, ast.Subscript):
+                # Case: df[['col1', 'col2']].groupby()
+                if isinstance(groupby_call_node.func.value.value, ast.Name):
+                    df_var = groupby_call_node.func.value.value.id
+                    selected_columns = self._extract_columns_from_selection(groupby_call_node.func.value)
+                    logger.debug(f"Extracted selected columns from {df_var}: {selected_columns}")
+        
+        logger.debug(f"DataFrame variable: {df_var}")
+        
+        # Get or create schema
+        schema = None
+        if df_var:
+            schema = self.schema_registry.get_schema(df_var)
+            if not schema:
+                schema = self.schema_registry.register_dataframe(df_var)
+                logger.debug(f"Created new schema for {df_var}")
+            else:
+                logger.debug(f"Using existing schema for {df_var}: columns={schema.columns}")
+            
+            # Create a copy for this chain
+            schema = schema.copy()
+            
+            # Apply selection if columns were specified
+            if selected_columns:
+                schema.apply_selection(selected_columns)
+                logger.debug(f"Applied selection to schema: {selected_columns}")
+            
+            # Apply groupby and aggregation
+            schema.apply_groupby(group_keys)
+            logger.debug(f"Applied groupby to schema with keys: {group_keys}")
+            
+            schema.apply_aggregation(agg_method)
+            logger.debug(f"Applied aggregation {agg_method} to schema")
+            logger.debug(f"Updated schema columns: {schema.columns}")
+            logger.debug(f"Updated schema aggregated columns: {schema.aggregated_columns}")
+        
+        # Visit the groupby call to transform it
         transformed_groupby = self.visit_Call(groupby_call_node)
 
         # Use mapping layer for 'agg' method
@@ -274,6 +864,26 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             if translation and translation.method_chain:
                 args_dict = self._args_to_dict(node)
                 chain = translation.method_chain(node.args, args_dict)
+                
+                # Process aggregation arguments to update schema
+                if schema and node.args and isinstance(node.args[0], ast.Dict):
+                    agg_dict = {}
+                    for col_node, agg_node in zip(node.args[0].keys, node.args[0].values):
+                        if isinstance(col_node, ast.Constant):
+                            col = col_node.value
+                            # Single aggregation as string
+                            if isinstance(agg_node, ast.Constant):
+                                agg_dict[col] = agg_node.value
+                            # Multiple aggregations as list
+                            elif isinstance(agg_node, ast.List):
+                                agg_dict[col] = [
+                                    elt.value for elt in agg_node.elts 
+                                    if isinstance(elt, ast.Constant)
+                                ]
+                    
+                    schema.apply_aggregation_dict(agg_dict)
+                    logger.debug(f"Applied aggregation dict to schema: {agg_dict}")
+                
                 current_node = transformed_groupby
                 for method, args, kwargs in chain:
                     current_node = ast.Call(
@@ -286,37 +896,92 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                         keywords=[ast.keyword(arg=k, value=self._convert_arg_value(v))
                                   for k, v in kwargs.items() if v is not None]
                     )
+                
+                # Save schema for the result DataFrame
+                result_var = self._get_target_name(node)
+                if result_var and schema:
+                    self.schema_registry.update_schema(result_var, schema)
+                    logger.debug(f"Updated schema for {result_var}")
+                    
                 return current_node
             else:
                 raise TranslationError("No mapping for groupby.agg")
+                
         # Fallback for simple aggregations (sum, mean, etc.)
         self.needs_polars_import = True
-        agg_exprs = [ast.Call(
-            func=ast.Attribute(
-                value=ast.Call(
-                    func=ast.Attribute(
-                        value=ast.Name(id='pl', ctx=ast.Load()),
-                        attr='all',
-                        ctx=ast.Load()
+        
+        # Generate specific column expressions for non-group columns
+        agg_exprs = []
+        if schema:
+            # Use schema to generate specific column expressions
+            for col in schema.columns:
+                if col in schema.group_keys:
+                    continue
+                    
+                # Find the original column name (before aggregation)
+                original_col = None
+                for agg_col, info in schema.aggregated_columns.items():
+                    if agg_col == col:
+                        original_col = info['source_col']
+                        break
+                
+                if original_col:
+                    logger.debug(f"Adding specific column expression for {original_col} -> {col}")
+                    agg_exprs.append(ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Call(
+                                func=ast.Attribute(
+                                    value=ast.Name(id='pl', ctx=ast.Load()),
+                                    attr='col',
+                                    ctx=ast.Load()
+                                ),
+                                args=[ast.Constant(value=original_col)],
+                                keywords=[]
+                            ),
+                            attr=agg_method,
+                            ctx=ast.Load()
+                        ),
+                        args=[],
+                        keywords=[]
+                    ))
+        
+        # If no specific columns found, use pl.all()
+        if not agg_exprs:
+            logger.debug("No specific columns found, using pl.all()")
+            agg_exprs = [ast.Call(
+                func=ast.Attribute(
+                    value=ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Name(id='pl', ctx=ast.Load()),
+                            attr='all',
+                            ctx=ast.Load()
+                        ),
+                        args=[],
+                        keywords=[]
                     ),
-                    args=[],
-                    keywords=[]
+                    attr=agg_method,
+                    ctx=ast.Load()
                 ),
-                attr=agg_method,
-                ctx=ast.Load()
-            ),
-            args=[],
-            keywords=[]
-        )]
+                args=[],
+                keywords=[]
+            )]
+            
         final_node = ast.Call(
             func=ast.Attribute(
                 value=transformed_groupby,
                 attr='agg',
                 ctx=ast.Load()
             ),
-            args=[agg_exprs[0]],
+            args=agg_exprs if len(agg_exprs) > 1 else [agg_exprs[0]],
             keywords=[]
         )
+        
+        # Save schema for the result DataFrame
+        result_var = self._get_target_name(node)
+        if result_var and schema:
+            self.schema_registry.update_schema(result_var, schema)
+            logger.debug(f"Updated schema for {result_var}")
+            
         return final_node
         
     def _transform_dataframe_method(self, node: ast.Call) -> ast.AST:
@@ -325,6 +990,7 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             
         var_name = node.func.value.id
         method_name = node.func.attr
+        logger.debug(f"_transform_dataframe_method: processing {var_name}.{method_name}")
         
         if hasattr(node.func.value, 'attr') and node.func.value.attr == 'str':
             return self._transform_string_method(node)
@@ -336,7 +1002,15 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         if not translation:
             raise UnsupportedPandasUsageError(f"Pandas method '{method_name}' has no direct polars equivalent")
             
+        logger.debug(f"_transform_dataframe_method: translating {method_name} -> {translation.polars_method}")
+        
         self.dataframe_vars.add(var_name)
+        
+        # Get schema for this DataFrame
+        schema = self.schema_registry.get_schema(var_name)
+        if not schema:
+            # Register with empty schema if not already tracked
+            schema = self.schema_registry.register_dataframe(var_name)
         
         self.needs_polars_import = True
         if translation.requires_selector:
@@ -354,21 +1028,55 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 # Filter out inplace from keywords
                 node.keywords = [kw for kw in node.keywords if kw.arg != 'inplace']
 
+        # Create a new schema for this operation chain
+        new_schema = schema.copy()
+                
+        # Update schema for method-specific operations
+        if method_name == 'groupby':
+            group_keys = self._extract_groupby_keys(node)
+            new_schema.apply_groupby(group_keys)
+            logger.debug(f"Applied groupby to schema with keys: {group_keys}")
+        elif method_name in ['mean', 'sum', 'min', 'max', 'count']:
+            new_schema.apply_aggregation(method_name)
+            logger.debug(f"Applied aggregation {method_name} to schema")
+
         if translation.method_chain:
-            chain = translation.method_chain(node.args, args_dict)
+            # Pass schema to the method chain function if needed
+            if method_name == 'sort_values':
+                logger.debug(f"_transform_dataframe_method: passing schema to sort_values chain")
+                chain = translation.method_chain(node.args, args_dict, new_schema)
+            else:
+                chain = translation.method_chain(node.args, args_dict)
+                
+            logger.debug(f"_transform_dataframe_method: method chain = {chain}")
+                
             if chain:
                 current_node = ast.Name(id=f"{var_name}_pl", ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id=var_name, ctx=ast.Load())
-                for method, args, kwargs in chain:
+                
+                # Process each method in the chain
+                for i, (method, args, kwargs) in enumerate(chain):
+                    logger.debug(f"_transform_dataframe_method: building chain step {i+1}: {method}")
+                    
+                    # Create the method call
                     current_node = ast.Call(
                         func=ast.Attribute(
                             value=current_node,
-                            attr=method,
+                            attr=method,  # This should be the polars method name
                             ctx=ast.Load()
                         ),
                         args=args,
                         keywords=[ast.keyword(arg=k, value=self._convert_arg_value(v)) 
                                 for k, v in kwargs.items() if v is not None]
                     )
+                
+                # Save the schema for the result
+                result_var = self._get_target_name(node)
+                if result_var:
+                    self.schema_registry.update_schema(result_var, new_schema)
+                    logger.debug(f"Updated schema for {result_var}")
+                elif inplace:
+                    self.schema_registry.update_schema(var_name, new_schema)
+                    logger.debug(f"Updated schema for {var_name} (inplace)")
                 
                 # If inplace=True, wrap in assignment
                 if inplace:
@@ -379,12 +1087,15 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                     ast.copy_location(result_node, node)  # Copy location to the assignment
                     return result_node
                 
+                logger.debug(f"_transform_dataframe_method: final node = {ast.dump(current_node)}")
                 return current_node
 
+        # For simple method calls (not chains)
+        logger.debug(f"_transform_dataframe_method: creating simple method call {translation.polars_method}")
         new_node = ast.Call(
             func=ast.Attribute(
                 value=ast.Name(id=f"{var_name}_pl", ctx=ast.Load()) if self.config.get('rename_dataframe', False) else ast.Name(id=var_name, ctx=ast.Load()),
-                attr=translation.polars_method,
+                attr=translation.polars_method,  # This should be the polars method name
                 ctx=ast.Load()
             ),
             args=node.args,
@@ -397,14 +1108,21 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             for kw in original_keywords:
                 if kw.arg in translation.argument_map:
                     if translation.argument_map[kw.arg] is not None:
-                        new_keywords.append(ast.keyword(
-                            arg=translation.argument_map[kw.arg],
-                            value=kw.value
-                        ))
+                        new_kw = ast.keyword(arg=translation.argument_map[kw.arg], value=kw.value)
+                        new_keywords.append(new_kw)
                 else:
                     new_keywords.append(kw)
             new_node.keywords = new_keywords
-        
+            
+        # Save the schema
+        result_var = self._get_target_name(node)
+        if result_var:
+            self.schema_registry.update_schema(result_var, new_schema)
+            logger.debug(f"Updated schema for {result_var}")
+        elif inplace:
+            self.schema_registry.update_schema(var_name, new_schema)
+            logger.debug(f"Updated schema for {var_name} (inplace)")
+
         # If inplace=True, wrap in assignment
         if inplace:
             target_name = self._get_target_name(node.func.value)
@@ -413,29 +1131,9 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
             result_node = ast.Assign(targets=[target_node], value=new_node)
             ast.copy_location(result_node, node)  # Copy location to the assignment
             return result_node
-            
+        
+        logger.debug(f"_transform_dataframe_method: final simple node = {ast.dump(new_node)}")
         return new_node
-        
-    def _get_target_name(self, node):
-        """Extract the target name for assignment from a node.
-        
-        For simple variables like 'df', returns 'df_pl' if rename_dataframe is True.
-        For attribute access like 'data.df', returns 'data.df_pl' if rename_dataframe is True.
-        """
-        if isinstance(node, ast.Name):
-            # Simple variable: df -> df_pl
-            return f"{node.id}_pl" if self.config.get('rename_dataframe', False) else node.id
-        elif isinstance(node, ast.Attribute):
-            # Attribute access: data.df -> data.df_pl
-            base = self._get_target_name(node.value)
-            if self.config.get('rename_dataframe', False):
-                return f"{base}.{node.attr}_pl"
-            else:
-                return f"{base}.{node.attr}"
-        else:
-            # Fallback for complex expressions
-            logger.warning(f"Complex expression in inplace operation: {ast.dump(node)}")
-            return "result_pl" if self.config.get('rename_dataframe', False) else "result"
         
     def _transform_string_method(self, node: ast.Call) -> ast.AST:
         method_name = node.func.attr
@@ -818,9 +1516,17 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
                 self.needs_polars_import = True  # Ensure AUTO strategy adds import
             rhs = rewritten_rhs if rewritten_rhs is not None else rhs
             rhs = self.visit(rhs)  # Ensure recursive visiting of new rhs
+            
+            # Extract columns if possible
+            columns = self._extract_columns_from_df_creation(rhs)
+            
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     new_df_vars.add(target.id)
+                    # Register DataFrame with columns
+                    if columns:
+                        self.schema_registry.register_dataframe(target.id, columns)
+                    
             new_targets = [
                 ast.Name(id=f"{t.id}_pl", ctx=ast.Store()) if isinstance(t, ast.Name) and self.config.get('rename_dataframe', False) else t
                 for t in node.targets
@@ -861,6 +1567,104 @@ class PandasToPolarsTransformer(ast.NodeTransformer):
         new_dict = ast.Dict(keys=new_keys, values=new_values)
         ast.copy_location(new_dict, node)
         return new_dict
+
+    def _extract_columns_from_node(self, node: ast.AST) -> List[str]:
+        """Extract column names from an AST node (list, string constant, etc.)."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return [node.value]
+        elif isinstance(node, ast.List):
+            result = []
+            for elt in node.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    result.append(elt.value)
+            return result
+        return []
+    
+    def _extract_groupby_keys(self, node: ast.Call) -> List[str]:
+        """Extract groupby keys from a groupby() call node."""
+        keys = []
+        
+        if not isinstance(node, ast.Call):
+            return keys
+            
+        # Check positional args (first arg is 'by')
+        if node.args:
+            keys = self._extract_columns_from_node(node.args[0])
+        
+        # Check keyword args
+        for kw in node.keywords:
+            if kw.arg == 'by':
+                keys = self._extract_columns_from_node(kw.value)
+                break
+        
+        return keys
+    
+    def _extract_columns_from_selection(self, node: ast.AST) -> List[str]:
+        """Extract column names from a DataFrame selection like df[['A', 'B']]."""
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.List):
+            return self._extract_columns_from_node(node.slice)
+        return []
+    
+    def _get_df_var_from_node(self, node: ast.AST) -> Optional[str]:
+        """Extract DataFrame variable name from a node."""
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            return node.value.id
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            return node.func.value.id
+        return None
+
+    def _get_target_name(self, node):
+        """Extract the target name for assignment from a node.
+        
+        For simple variables like 'df', returns 'df_pl' if rename_dataframe is True.
+        For attribute access like 'data.df', returns 'data.df_pl' if rename_dataframe is True.
+        """
+        if isinstance(node, ast.Name):
+            # Simple variable: df -> df_pl
+            return f"{node.id}_pl" if self.config.get('rename_dataframe', False) else node.id
+        elif isinstance(node, ast.Attribute):
+            # Attribute access: data.df -> data.df_pl
+            base = self._get_target_name(node.value)
+            if self.config.get('rename_dataframe', False):
+                return f"{base}.{node.attr}_pl"
+            else:
+                return f"{base}.{node.attr}"
+        else:
+            # Fallback for complex expressions
+            logger.warning(f"Complex expression in inplace operation: {ast.dump(node)}")
+            return "result_pl" if self.config.get('rename_dataframe', False) else "result"
+
+    def _extract_columns_from_df_creation(self, node: ast.AST) -> List[str]:
+        """Extract column names from DataFrame creation nodes."""
+        columns = []
+        
+        # Case: pl.DataFrame({'col1': values, 'col2': values})
+        if (isinstance(node, ast.Call) and 
+            isinstance(node.func, ast.Attribute) and 
+            isinstance(node.func.value, ast.Name) and 
+            node.func.value.id == 'pl' and 
+            node.func.attr == 'DataFrame'):
+            
+            # Look for dictionary argument
+            for arg in node.args:
+                if isinstance(arg, ast.Dict):
+                    for key in arg.keys:
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                            columns.append(key.value)
+            
+            # Look for keyword arguments
+            for kw in node.keywords:
+                if kw.arg == 'data' and isinstance(kw.value, ast.Dict):
+                    for key in kw.value.keys:
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                            columns.append(key.value)
+        
+        # Case: pl.read_csv('file.csv')
+        # In this case, we can't easily determine columns without actually reading the file
+        
+        return columns
 
 def rewrite_chain_base_to_polars(node, pandas_aliases):
     """
