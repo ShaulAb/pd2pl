@@ -172,6 +172,36 @@ class SchemaState:
         result = [self.resolve_column_reference(col) for col in col_names]
         logger.debug(f"SchemaState.resolve_column_references: resolved {col_names} -> {result}")
         return result
+        
+    def get_pandas_compat_rename_map(self) -> Dict[str, str]:
+        """Generate a map for renaming suffixed columns back to pandas-compatible names.
+        
+        This creates a mapping from aggregated column names (e.g., 'value1_mean') 
+        to their original pandas-compatible names (e.g., 'value1') to restore pandas-compatible
+        column naming behavior after aggregations.
+        
+        Returns:
+            Dict mapping suffixed column names to original column names
+        """
+        rename_map = {}
+        
+        # Handle two types of aggregated_columns storage: 
+        # 1. {original_col: suffixed_col} format
+        # 2. {suffixed_col: {'source_col': original_col, 'agg_function': func}} format
+        
+        # Process type 1
+        for orig_col, suffixed_col in self.aggregated_columns.items():
+            if isinstance(suffixed_col, str):
+                # Map from suffixed to original (e.g., 'value1_mean' -> 'value1')
+                rename_map[suffixed_col] = orig_col
+        
+        # Process type 2
+        for suffixed_col, info in self.aggregated_columns.items():
+            if isinstance(info, dict) and 'source_col' in info:
+                rename_map[suffixed_col] = info['source_col']
+        
+        logger.debug(f"SchemaState.get_pandas_compat_rename_map: generated rename map {rename_map}")
+        return rename_map
 
 
 class SchemaRegistry:
