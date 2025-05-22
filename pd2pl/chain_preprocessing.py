@@ -97,36 +97,61 @@ class ChainDetectionVisitor(ast.NodeVisitor):
 
 def preprocess_chains(tree: ast.AST, dataframe_vars: Set[str]) -> Tuple[ChainRegistry, SchemaRegistry]:
     """Preprocess AST to identify method chains and calculate schemas."""
+    logger.debug(f"*** CHAIN DETECTION: Starting preprocessing with {len(dataframe_vars)} known DataFrame vars")
+    
     # Phase 1: Identify method chains
     chain_detector = ChainDetectionVisitor()
+    chain_detector.dataframe_vars = dataframe_vars
+    logger.debug(f"CHAIN DETECTION: Using DataFrame vars: {dataframe_vars}")
     chain_detector.visit(tree)
     chain_registry = chain_detector.chain_registry
     
+    # Log initial chain detection results
+    logger.debug(f"CHAIN DETECTION: Initial detection found {len(chain_registry.nodes_by_id)} method nodes")
+    if chain_registry.nodes_by_id:
+        logger.debug(f"CHAIN DETECTION: Method nodes: {[(node.method_name, id(node.node)) for node in chain_registry.nodes_by_id.values()]}")
+    
     # Connect chains if we have parent information
     if hasattr(chain_detector, 'chain_parents'):
-        logger.debug("Connecting chains based on parent-child relationships")
+        logger.debug(f"CHAIN DETECTION: Found {len(chain_detector.chain_parents)} parent-child relationships")
         # Find all root nodes that are actually part of a larger chain
         for node_id, node in chain_registry.nodes_by_id.items():
             if node.parent is None and id(node.node) in chain_detector.chain_parents:
                 parent_node = chain_detector.chain_parents[id(node.node)]
                 parent_chain_node = chain_registry.get_node(parent_node)
                 if parent_chain_node:
-                    logger.debug(f"Connecting {node.method_name} to parent {parent_chain_node.method_name}")
+                    logger.debug(f"CHAIN DETECTION: Connecting {node.method_name} (ID={id(node.node)}) to parent {parent_chain_node.method_name} (ID={id(parent_chain_node.node)})")
                     parent_chain_node.add_child(node)
                     # Remove from root nodes if it was there
                     if node in chain_registry.root_nodes:
                         chain_registry.root_nodes.remove(node)
     
     # Now finalize the chains
+    logger.debug("CHAIN DETECTION: Finalizing chains")
     chain_registry.finalize_chains()
     
-    # Debug output of chains
-    logger.debug("Chain preprocessing complete. Identified chains:")
-    chain_registry.print_chains()
+    # Detailed logging of finalized chains
+    if chain_registry.chains_by_id:
+        logger.debug(f"CHAIN DETECTION: Finalized {len(chain_registry.chains_by_id)} method chains")
+        for chain_id, nodes in chain_registry.chains_by_id.items():
+            sorted_nodes = sorted(nodes, key=lambda n: n.position)
+            methods = [n.method_name for n in sorted_nodes]
+            logger.debug(f"CHAIN DETECTION: Chain {chain_id}: {' -> '.join(methods)}")
+            logger.debug(f"CHAIN STRUCTURE: {[(n.method_name, id(n.node)) for n in sorted_nodes]}")
+            
+            # Log special chains we're interested in
+            if 'groupby' in methods and 'sort_values' in methods:
+                logger.debug(f"CHAIN DETECTION: Found groupby+sort_values chain: {chain_id}")
+                if 'mean' in methods:
+                    logger.debug(f"CHAIN DETECTION: Complete groupby+mean+sort_values pattern in chain {chain_id}")
+    else:
+        logger.debug("CHAIN DETECTION: No method chains identified after finalization")
     
     # Phase 2: Analyze schemas through chains
+    logger.debug("CHAIN DETECTION: Starting schema analysis phase")
     schema_registry = SchemaRegistry()
     analyze_chain_schemas(chain_registry, schema_registry, dataframe_vars)
+    logger.debug("CHAIN DETECTION: Schema analysis complete")
     
     return chain_registry, schema_registry
 
