@@ -7,13 +7,14 @@ from pd2pl.errors import TranslationError
 from .method_categories import MethodCategory, ChainableMethodTranslation
 from .string_maps import STRING_METHODS_INFO
 
-def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
+def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any], schema=None) -> List[Tuple[str, List[Any], Dict[str, Any]]]:
     """Transform sort_values arguments to polars sort parameters.
     
     Handles:
     - Column specifications (string, list, or expressions)
     - Ascending/descending orders
     - NA position
+    - Column name resolution with schema (for groupby chains)
     
     Moves column specifications to args for more idiomatic Polars code.
     """
@@ -27,6 +28,35 @@ def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple
         columns = args[0]
     else:
         columns = []
+    
+    logger.debug(f"_transform_sort_chain: initial columns={columns}")
+    
+    # If schema is provided and we're in a groupby chain, resolve column references
+    if schema and schema.in_groupby_chain:
+        logger.debug(f"_transform_sort_chain: resolving columns with schema, in_groupby_chain={schema.in_groupby_chain}")
+        logger.debug(f"_transform_sort_chain: schema columns={schema.columns}")
+        logger.debug(f"_transform_sort_chain: schema aggregated_columns={schema.aggregated_columns}")
+        
+        if isinstance(columns, ast.Constant) and isinstance(columns.value, str):
+            # Single column name
+            orig_col = columns.value
+            resolved_col = schema.resolve_column_reference(orig_col)
+            logger.debug(f"_transform_sort_chain: resolved single column {orig_col} -> {resolved_col}")
+            columns = ast.Constant(value=resolved_col)
+        elif isinstance(columns, ast.List):
+            # List of column names
+            new_elts = []
+            for elt in columns.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                    orig_col = elt.value
+                    resolved_col = schema.resolve_column_reference(orig_col)
+                    logger.debug(f"_transform_sort_chain: resolved list column {orig_col} -> {resolved_col}")
+                    new_elts.append(ast.Constant(value=resolved_col))
+                else:
+                    new_elts.append(elt)
+            columns = ast.List(elts=new_elts, ctx=ast.Load())
+        
+    logger.debug(f"_transform_sort_chain: resolved columns={columns}")
         
     # Normalize columns to handle single column and list cases
     if isinstance(columns, ast.List):
@@ -49,16 +79,38 @@ def _transform_sort_chain(args: List[Any], kwargs: Dict[str, Any]) -> List[Tuple
         ascending = kwargs['ascending']
         if isinstance(ascending, ast.List):
             # For multiple columns, invert each boolean in the list
+            new_elts = []
+            for elt in ascending.elts:
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, bool):
+                    # Create boolean constant with inverted value
+                    new_elts.append(ast.Constant(value=not elt.value))
+                else:
+                    # For non-constants, use a UnaryOp with Not operator
+                    new_elts.append(ast.UnaryOp(
+                        op=ast.Not(),
+                        operand=elt
+                    ))
+            
             sort_kwargs['descending'] = ast.List(
-                elts=[
-                    ast.Constant(value=not elt.value)  # Create boolean constant with inverted value
-                    for elt in ascending.elts
-                ],
+                elts=new_elts,
                 ctx=ast.Load()
             )
         elif isinstance(ascending, ast.Constant):
-            # For single value, just invert the boolean
-            sort_kwargs['descending'] = ast.Constant(value=not ascending.value)
+            if isinstance(ascending.value, bool):
+                # For single boolean constant, just invert the value
+                sort_kwargs['descending'] = ast.Constant(value=not ascending.value)
+            else:
+                # For non-boolean constants, generate a runtime inversion
+                sort_kwargs['descending'] = ast.UnaryOp(
+                    op=ast.Not(),
+                    operand=ascending
+                )
+        else:
+            # For other expressions, use the Not operator
+            sort_kwargs['descending'] = ast.UnaryOp(
+                op=ast.Not(),
+                operand=ascending
+            )
     
     # Handle na_position
     if 'na_position' in kwargs:
