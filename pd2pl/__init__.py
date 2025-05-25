@@ -42,13 +42,30 @@ def translate_code(pandas_code: str, postprocess_imports: bool = True, format_ou
 
     effective_config = config or TranslationConfig.get_config()
     import_strategy = effective_config.get('import_strategy', TranslationConfig._defaults['import_strategy'])
-    transformer = PandasToPolarsTransformer(config=effective_config)
-    try:
-        logger.debug(f">>> translate_code: About to visit AST tree: {repr(tree)}")
-        new_tree = transformer.visit(tree)
-    except Exception as e:
-        logger.error(f"Error during AST transformation: {e}", exc_info=True)
-        raise
+    use_astroid = effective_config.get('use_astroid', TranslationConfig._defaults['use_astroid'])
+    
+    if use_astroid:
+        # Use the astroid-based implementation
+        try:
+            from pd2pl.astroid_core import AstroidBasedTransformer
+            logger.debug("Using astroid-based transformer")
+            transformer = AstroidBasedTransformer(config=effective_config)
+            # For astroid, we use a different API that takes the code directly
+            return transformer.transform(pandas_code)
+        except ImportError as e:
+            logger.warning(f"Failed to import astroid-based transformer: {e}. Falling back to ast-based implementation.")
+            use_astroid = False
+    
+    if not use_astroid:
+        # Use the classic ast-based implementation
+        logger.debug("Using classic ast-based transformer")
+        transformer = PandasToPolarsTransformer(config=effective_config)
+        try:
+            logger.debug(f">>> translate_code: About to visit AST tree: {repr(tree)}")
+            new_tree = transformer.visit(tree)
+        except Exception as e:
+            logger.error(f"Error during AST transformation: {e}", exc_info=True)
+            raise
     
     polars_code = ast.unparse(new_tree)
     
