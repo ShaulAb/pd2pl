@@ -9,10 +9,12 @@ class TranslationConfig:
         "rename_dataframe": False,  # Default: keep variable names as-is
         "verbosity": 1,             # Default: normal verbosity
         "import_strategy": ImportStrategy.AUTO,  # New default
+        "use_astroid": False,      # Default: use standard ast module
     }
     rename_dataframe = _defaults["rename_dataframe"]
     verbosity = _defaults["verbosity"]
     import_strategy = _defaults["import_strategy"]
+    use_astroid = _defaults["use_astroid"]
 
     @classmethod
     def set(cls, **kwargs):
